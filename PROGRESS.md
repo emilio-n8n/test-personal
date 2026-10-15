@@ -5,7 +5,7 @@
 save/reopen → STL/STEP) to CADCraft **without degrading anything 2D**.
 
 > This file is the durable handoff record. Update it at every milestone, before committing.
-> Last updated: Phase 0 (baseline) — see "Status" below.
+> Last updated: Phase 3 done — the kernel and the parametric layer are working and tested. See "Status".
 
 ## Storage and persistence (verified, not assumed)
 
@@ -45,11 +45,15 @@ attached disks, **both persistent**, no scratch disks:
 |---|---|---|
 | 0 | Toolchain, branch, persistence, test baseline | **done** |
 | 1 | `geom`: robust 2D boolean engine | **done** (`crates/geom/src/bool2d.rs`) |
-| 2 | `cadcraft-solid`: planar-faced B-rep kernel | **done** (blends incomplete) |
-| 3 | `cadcraft-model`: feature tree, recompute, projects | not started |
+| 2 | `cadcraft-solid`: planar-faced B-rep kernel | **done** — blends work, **0 ignored tests** |
+| 3 | `cadcraft-model`: feature tree, recompute, save/load | **done** (extrude, cut, blends; revolve refused) |
 | 4 | Engine commands, CLI, MCP | not started |
 | 5 | 3D viewport + tree/parameter panels | not started |
-| 6 | STEP/OBJ export, revolve, docs | not started |
+| 6 | STEP/OBJ export, docs, roadmap rows | not started |
+
+**The user's milestone is met end to end, headlessly:** sketch → dimension → extrude → cut →
+change the upstream dimension → recompute → save → reopen → the geometry checks out, and a broken
+edit keeps the last good solid and says why (`crates/model/tests/parametric.rs`).
 
 ## Phase 1 — 2D boolean engine (`crates/geom/src/bool2d.rs`)
 
@@ -92,16 +96,36 @@ off-the-default `validate_vertices`): closed (every edge exactly twice), consist
 in each direction), outward (positive volume), and manifold at vertices (one fan, not a pinch). A
 solid that violates any of them is an error, never a body handed to the renderer.
 
-**Honest limits:**
-- **Chamfer and fillet are implemented but not yet correct.** The tool is built and subtracted with
-  the ordinary boolean and the result is validated, so a blend that cannot be done returns an error
-  — but the boolean does not yet merge a blend tool's side face with the target face it lies in the
-  plane of, so blends are currently always refused. The volume tests are `#[ignore]`d and run with
-  `cargo test -p cadcraft-solid -- --ignored`.
-- A plane section that passes exactly through an edge or vertex is degenerate and currently loses
-  part of the section (one `#[ignore]`d test).
-- Planar faces only, so rounds are faceted; revolve is a facet sweep.
-- Edges are referenced geometrically (a point on the edge), not by persistent topological names.
+**Honest limits (as of commit `4e5a947`):**
+- Chamfer and fillet **work**: a chamfer of 2 on a 10-cube removes exactly 20, a fillet's removed
+  cross-section is within a whisker of `r²(1 − π/4)`, and a round on a *slanted* edge works too.
+  A blend whose tool runs off the end of its edge **across** a face it was not asked to cut is
+  refused with a reason (`tool_stays_within`), because welding three faces at that corner is not
+  finished. Touching such a face is normal and works.
+- A plane section through an exact edge or vertex now works (the old failure was a wrong
+  expectation in the test: the chord across a 4×4 face cut by `x+y=2` is 2√2, not 4√2).
+- Planar faces only, so rounds are faceted. Edges are referenced geometrically (a point on the
+  edge), not by persistent topological names.
+- **Revolve does not build a solid.** A partial revolve meets its own end caps at a degenerate
+  corner and a full turn has nothing to close with. The feature is wired and refused with the
+  reason; the tests state the rule (a solid that validates, or a named failure).
+
+**The blend bugs that were fixed (all real, all caught by tests):**
+1. The blend tool was built **inside out**: its cross-section ran the wrong way round relative to
+   the sweep, so every wall and cap faced inward and the tool was not a valid solid — which is why
+   *every* chamfer and fillet returned an open shell. The wedge is now the profile extruded through
+   the ordinary `extrude`, wound counter-clockwise about the sweep.
+2. The fillet's arc swept an angle measured in the **XY plane**, which is only right when the edge
+   lies in XY, and put its tangent points `r` along each face, which is only right at a right-angle
+   corner. It now rotates about the edge direction and uses `r/tan(half)`.
+3. **The boolean's coplanar welding** (`weld_edges`): a face a tool merely *touches* keeps its whole
+   loop while the faces around the touch get split, so the two stop sharing an edge. Two details make
+   the pass correct rather than plausible: vertices are snapped onto a shared grid *first* (the same
+   corner arrives by two routes a ten-millionth apart, and splitting one face and not the other
+   creates the mismatch), and only a vertex **in the face's plane** may split one of its edges (a
+   vertex off the plane projects exactly onto the edges of an axis-aligned solid).
+4. Validation reported a *different* broken edge on each run: the report is the first offender in
+   iteration order, and that order was `HashMap` order. Now a `BTreeMap`.
 
 ### Bugs the tests caught (each was real, not a test artefact)
 
@@ -121,13 +145,15 @@ solid that violates any of them is an error, never a body handed to the renderer
 
 | Command | Result |
 |---|---|
-| `cargo test -p cadcraft-geom` | **108 passed**, 0 failed (was 84) |
+| `cargo test -p cadcraft-geom` | **116 passed**, 0 failed (was 84) |
 | `cargo test -p cadcraft-constraints` | **36 passed**, 0 failed |
-| `cargo test -p cadcraft-solid` | **47 passed**, 0 failed, **7 ignored** (named, run with `--ignored`) |
+| `cargo test -p cadcraft-solid` | **68 passed**, 0 failed, **0 ignored** (was 47 + 7 ignored) |
+| `cargo test -p cadcraft-model` | **18 passed**, 0 failed |
+| `cargo test -p cadcraft-doc` | **64 passed**, 0 failed (2D app untouched) |
 | `cargo clippy -p cadcraft-geom --all-targets` | clean |
 | `cargo fmt -p cadcraft-geom` | applied |
-| `cargo check --workspace --all-targets` | **passes**, 14m07s — the 2D app and apps are untouched |
-| `cargo run -p xtask -- layers` | **17 crates, no layering violations** (`solid` is L0 → `geom`) |
+| `cargo check --workspace --all-targets` | **passes**, 14m07s (before phases 2–3) — rerun before the next commit |
+| `cargo run -p xtask -- layers` | **18 crates, no layering violations** (`solid` L0 → `geom`; `model` L3) |
 
 Property tests added (deterministic seeded RNG, repo's existing xorshift):
 - `boolean_of_rectangles_matches_the_analytic_overlap` — 400 random rectangle pairs, union /
@@ -145,6 +171,43 @@ Known-answer tests cover shared edges, collinear overlaps, nested regions, islan
 a notch on an edge, a square lying in a hole, tangency, determinism, scale invariance
 (1e-6 … 1e6) and a bow-tie under even-odd.
 
+## Phase 3 — parametric model (`crates/model`, L3)
+
+New crate above the kernel, registered in `xtask/src/layers.rs` as L3. `Model` = parameters +
+ordered named features. `FeatureKind` = `Extrude { sketch, depth, symmetric }`,
+`Revolve { sketch, axis, angle, segments }`, `Cut { tool }`, `Blend { edges, size, segments, round }`.
+`Expr`/`parse`/`evaluate` give parameters that are expressions over other parameters
+(`twice = height * 2`), with a DFS and a cycle check.
+
+**The two rules, and why they are the design:**
+1. **A failure never destroys the last good shape.** Each feature keeps the last solid that worked;
+   a failure keeps the feature's *own* last solid (not the running one — that bug once replaced a
+   cut's result with the untouched body).
+2. **Blocked ≠ failed.** A feature above a failure is `State::Blocked` with the reason, and its own
+   last good solid. "This could not be built" and "this was not built because the thing under it
+   could not" are different facts.
+
+**Dirty propagation** (`Model::dirty_from`) is a transitive walk: naming a feature dirties it, and a
+parameter defined in terms of another carries the change to everything that reads it.
+
+**Save/load**: `.ccm` is JSON holding the *history* (`Document`), never the geometry — so a file can
+never disagree with the features in it, and a document whose features no longer build still opens
+with the tree, the parameters and the error. `FORMAT_VERSION = 1`; a newer file is refused with both
+numbers. serde derives for `Vec2`/`Vec3` were added to `geom` (which already depends on serde).
+
+**Four bugs the tests found** (each documented in the code): a cut's tool replaced the body it was
+meant to cut; a partial rebuild handed each skipped feature the running solid instead of its own; a
+failure/blocked record kept the running solid; `Plane::flipped` reverses `u` as well as the normal
+and therefore *mirrors* a profile (a symmetric extrude moves its plane instead).
+
+**Honest limits:**
+- **Sketches do not read parameters.** A dimension drives depths, angles and blend sizes — and
+  everything that reads those — but cannot move a profile's corners. Constraint-driven sketches are
+  the next piece of work on this layer.
+- **Revolve is wired and refused**, not building (see Phase 2).
+- Edge references are geometric (`EdgeRef`: a point + tolerance). No topological naming. A reference
+  that stops resolving is an error naming the edge that is gone, never a silent re-target — tested.
+
 ## Known failures / limitations
 
 - OpenCASCADE: absent from the machine, unbuildable here on 2 cores, LGPL (forbidden by
@@ -154,22 +217,28 @@ a notch on an edge, a square lying in a hole, tangency, determinism, scale invar
 
 ## Next actions
 
-Ordered by what unblocks the first end-to-end milestone (sketch → dimension → extrude → cut →
-change a dimension → recompute → save → reopen → verify).
+The kernel and the parametric path are done and tested. What is left is reaching them from outside:
+commands, then rendering, then export.
 
-1. **Finish the boolean's coplanar-face merge** (`crates/solid/src/boolean.rs`). It is the one
-   defect standing between the kernel and working chamfers: a tool face lying in the plane of a
-   target face must be merged with it. Start by running `cargo test -p cadcraft-solid -- --ignored`
-   — the 7 ignored tests are the specification.
-2. **Feature tree** (`crates/model`, L3): parameters + expression, dirty propagation, rebuild
-   atomicity (keep the last good solid and the error on failure), geometric edge references.
-3. **Engine commands** (`crates/engine`): `solid.body.new`, `solid.feature.extrude|cut|chamfer|
-   fillet|revolve`, `solid.param.set|list`, `solid.export.stl|obj|step`, `solid.save|open`.
-   Commands must be JSON-only `CommandSpec`s with no `interactive` factory, so the `Vec2` prompt
-   protocol and the two global registry sweeps stay untouched.
-4. **Rendering + viewport** (`render::scene3`, CPU raster first; `ui-egui` orbit/pan/zoom, feature
-   tree and parameter panels, ray picking).
-5. **STEP AP214** export (`FACETED_BREP`), docs, `docs/solid-parity.md`, ROADMAP/gaps rows.
+1. **Engine commands** (`crates/engine`): `solid.body.new`, `solid.feature.extrude|cut|fillet|chamfer`,
+   `solid.param.set|list`, `solid.export.stl|obj`, `solid.save|open`. JSON-only `CommandSpec`s with
+   **no `interactive` factory**, so the `Vec2` prompt protocol and the two global registry sweeps
+   stay untouched. A Ukrainian row per label in `crates/ui-egui/src/i18n/uk.tsv`. Then the CLI
+   subcommand and the MCP tools in both `Remote` and `Headless` backends.
+2. **Constraint-driven sketches** (`crates/model`): a sketch whose corners read parameters, so a
+   dimension moves geometry and not only depths. This is what makes the user's sketch → dimension →
+   extrude → *change the dimension* loop complete in the shape people expect.
+3. **Fix revolve in the kernel** (`crates/solid/src/extrude.rs`): a partial revolve meets its end
+   caps at a degenerate corner, and a full turn produces no closing faces. The model-side tests are
+   already written in the form that says what a correct answer looks like.
+4. **Rendering + viewport**: `render::scene3` and a CPU raster first, then `ui-egui` orbit/pan/zoom,
+   a feature-tree panel and a parameter panel, with ray picking. **No UI work before the commands
+   work headlessly** — this VM has no display, so a GUI claim could not be verified.
+5. **STEP AP214** export (`FACETED_BREP`). Only claim it once an **independent** STEP parser accepts
+   the file, as the user required; OBJ is a quick check that the mesh path is honest.
+6. **Docs**: `docs/solid-parity.md`, the `docs/gaps.md` F24 row (3D, ~300–450 h), ROADMAP.
+7. **`cargo xtask ci`** at the next phase boundary (20–40 min on 2 cores); `cargo check` plus
+   targeted tests in the loop.
 
 Do **not** start the UI before the feature tree and commands work headlessly: this VM has no
 display, so every UI claim would be unverifiable.
@@ -181,5 +250,6 @@ cd /home/emilio_developpeur/cadcraft
 git switch feature/3d-parametric          # durable: persistent home PD
 . /tmp/opencode/env.sh                    # re-create if the VM restarted (re-downloadable)
 git log --oneline -5                      # last committed milestone
-cargo test -p cadcraft-geom               # then resume at "Next actions" above
+cargo test -p cadcraft-solid -p cadcraft-model -p cadcraft-geom   # then "Next actions" above
+cargo run -p xtask -- layers              # 18 crates, no violations
 ```
