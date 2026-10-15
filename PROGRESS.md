@@ -27,9 +27,13 @@ attached disks, **both persistent**, no scratch disks:
 ## Environment
 
 - 2 CPU cores, 7 GB RAM, no GPU, no Vulkan ICD, no X11/Wayland, no Xvfb.
-- rustc/cargo **1.99.0** installed under `/tmp/opencode/rustup` + `/tmp/opencode/cargo`
+- rustc/cargo under `/tmp/opencode/rustup` + `/tmp/opencode/cargo`
   (`rustup toolchain install stable --profile minimal --component rustfmt,clippy`), plus the
   `wasm32-unknown-unknown` target. Re-installable from `logs/rustup.log`.
+- **The VM restarted between sessions and `/tmp/opencode` was empty**, exactly as predicted: the
+  toolchain was reinstalled from scratch (rustc/cargo **1.99.1** now, was 1.99.0) and `/tmp/opencode/env.sh`
+  was recreated. The repository on the persistent `home` disk was untouched, all six commits intact.
+  This is the expected cost of keeping only reproducible data off the persistent disk.
 - **The desktop app cannot be launched in this VM.** Any UI work can only be validated through
   egui_kittest harnesses and CPU-rendered PNGs, never through a running window. Claims about the
   GUI must say so explicitly.
