@@ -34,6 +34,7 @@ impl Class {
 /// prefix.
 pub const TABLE: &[(&str, Class)] = &[
     ("geom", Class::Layer(0)),
+    ("solid", Class::Layer(0)),
     ("dxf", Class::Standalone),
     ("dwg", Class::Standalone),
     ("color", Class::Layer(0)),
@@ -55,9 +56,11 @@ pub const TABLE: &[(&str, Class)] = &[
 
 /// Explicit orderings *within* a layer (earlier may be used by later).
 /// The L0 foundation is a small chain: `raster` builds on `color` and
-/// `geom`, which the §3 diagram draws on one line. The GPU backend (`gpu`)
-/// reuses the CPU reference (`compose`) for LUTs and parity tests.
-pub const INTRA_LAYER_ORDER: &[&[&str]] = &[&["geom", "color"], &["fonts", "render"]];
+/// `geom`, which the §3 diagram draws on one line. The 3D solid kernel
+/// (`solid`) builds on `geom` for its vectors and its 2D booleans. The GPU
+/// backend (`gpu`) reuses the CPU reference (`compose`) for LUTs and parity
+/// tests.
+pub const INTRA_LAYER_ORDER: &[&[&str]] = &[&["geom", "color", "solid"], &["fonts", "render"]];
 
 fn intra_layer_allowed(from: &str, to: &str) -> bool {
     let (from, to) = (short_name(from), short_name(to));

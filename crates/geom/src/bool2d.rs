@@ -880,10 +880,23 @@ fn seg_distance(a: Vec2, b: Vec2, p: Vec2) -> f64 {
 ///
 /// `None` only for hostile or oversized input; a well-formed empty result is an empty `Regions`.
 pub fn boolean(a: &Regions, b: &Regions, op: BoolOp) -> Option<Regions> {
+    // An empty operand has to be handled by the operation's own algebra, not by a single rule:
+    // `a - nothing` is `a`, but `nothing - a` and `a ∩ nothing` are both empty. Getting this wrong
+    // silently deletes a whole solid, because an empty section is the normal case for a cutting
+    // plane that misses.
     if a.is_empty() || b.is_empty() {
+        if a.is_empty() && b.is_empty() {
+            return Some(Regions::default());
+        }
+        if a.is_empty() {
+            return Some(match op {
+                BoolOp::Union | BoolOp::Xor => b.clone(),
+                BoolOp::Intersect | BoolOp::Difference => Regions::default(),
+            });
+        }
         return Some(match op {
-            BoolOp::Union => a.clone(),
-            BoolOp::Intersect | BoolOp::Difference | BoolOp::Xor => Regions::default(),
+            BoolOp::Union | BoolOp::Difference | BoolOp::Xor => a.clone(),
+            BoolOp::Intersect => Regions::default(),
         });
     }
     let bb = a.bounds().union(&b.bounds());
@@ -912,6 +925,42 @@ pub fn boolean(a: &Regions, b: &Regions, op: BoolOp) -> Option<Regions> {
     let kept: Vec<Frag> = frags.into_iter().filter(|f| survives(f, &pa, &pb, op, probe)).collect();
     let loops = assemble(&kept, tol)?;
     Some(regions_from_loops(loops, tol))
+}
+
+/// Chain a set of segments into closed loops.
+///
+/// A general utility over directed or undirected segments: loops come back consistently oriented
+/// with the material on the left. Loops that cannot be closed are dropped, and the whole call
+/// reports `None` only when the input is oversized or the budget is exhausted.
+pub fn chain_segments(segments: &[(Vec2, Vec2)], tol: f64) -> Option<Vec<Vec<Vec2>>> {
+    let tol = sanitize_tol(tol);
+    let bb = Bounds2::from_points(segments.iter().flat_map(|(a, b)| [*a, *b]));
+    if bb.is_empty() {
+        return Some(Vec::new());
+    }
+    let origin = bb.min;
+    let frags: Vec<Frag> = segments
+        .iter()
+        .filter_map(|(a, b)| {
+            let (a, b) = (*a, *b);
+            if a.is_finite() && b.is_finite() && !a.near(b, tol) { Some(Frag { a, b, ca: 1, cb: 0 }) } else { None }
+        })
+        .collect();
+    // Merge coincident segments first, or a doubled edge would cancel under even-odd.
+    let mut merged: Vec<Frag> = Vec::with_capacity(frags.len());
+    let mut index: HashMap<((i64, i64), (i64, i64)), usize> = HashMap::new();
+    for f in frags {
+        let (ka, kb) = (vkey(f.a, origin, tol), vkey(f.b, origin, tol));
+        let key = if ka <= kb { (ka, kb) } else { (kb, ka) };
+        match index.entry(key) {
+            std::collections::hash_map::Entry::Occupied(_) => {}
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(merged.len());
+                merged.push(f);
+            }
+        }
+    }
+    assemble(&merged, tol)
 }
 
 /// Union of two region sets.
@@ -969,6 +1018,21 @@ mod tests {
         assert!((d.area() - 3.0).abs() < 1e-9, "difference area {}", d.area());
         let x = xor(&a, &b).unwrap_or_default();
         assert!((x.area() - 6.0).abs() < 1e-9, "xor area {}", x.area());
+    }
+
+    #[test]
+    fn an_empty_operand_follows_the_operations_own_algebra() {
+        let e = Regions::default();
+        let a = one(rect(0.0, 0.0, 2.0, 2.0));
+        assert_eq!(difference(&a, &e).unwrap_or_default(), a, "a - nothing is a");
+        assert!(difference(&e, &a).unwrap_or_default().is_empty(), "nothing - a is empty");
+        assert_eq!(union(&a, &e).unwrap_or_default(), a);
+        assert_eq!(union(&e, &a).unwrap_or_default(), a);
+        assert!(intersect(&a, &e).unwrap_or_default().is_empty());
+        assert!(intersect(&e, &a).unwrap_or_default().is_empty());
+        assert_eq!(xor(&a, &e).unwrap_or_default(), a);
+        assert_eq!(xor(&e, &a).unwrap_or_default(), a);
+        assert!(union(&e, &e).unwrap_or_default().is_empty());
     }
 
     #[test]
@@ -1166,7 +1230,7 @@ mod tests {
         let _ = union(&huge, &huge);
         let _ = difference(&huge, &ok);
         // Empty inputs.
-        assert!(union(&Regions::default(), &ok).unwrap_or_default().is_empty());
+        assert_eq!(union(&Regions::default(), &ok).unwrap_or_default(), ok);
         assert!(intersect(&ok, &Regions::default()).unwrap_or_default().is_empty());
     }
 

@@ -1,0 +1,13 @@
+[package]
+name = "cadcraft-solid"
+description = "CADCraft solid kernel: planar-faced B-rep solids, extrude, revolve, boolean, chamfer, fillet, mass properties"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cadcraft-geom = { workspace = true }
+thiserror = { workspace = true }

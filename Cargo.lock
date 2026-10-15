@@ -703,6 +703,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cadcraft-solid"
+version = "0.7.0"
+dependencies = [
+ "cadcraft-geom",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "cadcraft-ui-egui"
 version = "0.7.0"
 dependencies = [

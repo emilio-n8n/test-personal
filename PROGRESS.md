@@ -45,7 +45,7 @@ attached disks, **both persistent**, no scratch disks:
 |---|---|---|
 | 0 | Toolchain, branch, persistence, test baseline | **done** |
 | 1 | `geom`: robust 2D boolean engine | **done** (`crates/geom/src/bool2d.rs`) |
-| 2 | `cadcraft-solid`: planar-faced B-rep kernel | next |
+| 2 | `cadcraft-solid`: planar-faced B-rep kernel | **done** (blends incomplete) |
 | 3 | `cadcraft-model`: feature tree, recompute, projects | not started |
 | 4 | Engine commands, CLI, MCP | not started |
 | 5 | 3D viewport + tree/parameter panels | not started |
@@ -77,12 +77,53 @@ into loops → sort loops into regions by nesting depth.
 (`diag × 1e-11`, clamped); features thinner than the tolerance are not resolved; degenerate
 geometry is dropped rather than returned as slivers; oversized input returns `None`.
 
+## Phase 2 — solid kernel (`crates/solid`)
+
+New crate at L0 (registered in `xtask/src/layers.rs`), building on `geom` for vectors and the 2D
+boolean. Representation: a `Solid` is a set of planar `Face`s, each an infinite `Plane` plus a
+`Regions` (outer loop + holes) in that plane's own frame. Faces carry no vertices — the shared
+boundary *is* the topology.
+
+**Working and tested:** `extrude`, `revolve`, 3D `boolean` (union / intersect / difference),
+plane `section`, tessellation + STL (ASCII and binary), exact volume / area / centroid.
+
+**Invariants** (documented in the crate header, enforced by `Solid::validate`, with a second,
+off-the-default `validate_vertices`): closed (every edge exactly twice), consistently oriented (once
+in each direction), outward (positive volume), and manifold at vertices (one fan, not a pinch). A
+solid that violates any of them is an error, never a body handed to the renderer.
+
+**Honest limits:**
+- **Chamfer and fillet are implemented but not yet correct.** The tool is built and subtracted with
+  the ordinary boolean and the result is validated, so a blend that cannot be done returns an error
+  — but the boolean does not yet merge a blend tool's side face with the target face it lies in the
+  plane of, so blends are currently always refused. The volume tests are `#[ignore]`d and run with
+  `cargo test -p cadcraft-solid -- --ignored`.
+- A plane section that passes exactly through an edge or vertex is degenerate and currently loses
+  part of the section (one `#[ignore]`d test).
+- Planar faces only, so rounds are faceted; revolve is a facet sweep.
+- Edges are referenced geometrically (a point on the edge), not by persistent topological names.
+
+### Bugs the tests caught (each was real, not a test artefact)
+
+1. `difference(a, empty)` returned **empty** instead of `a` — this silently deleted whole solids,
+   because an empty section is the normal case for a cutting plane that misses.
+2. `Face::flipped` kept the loop in a **mirrored** frame, so flipping a face moved its boundary.
+3. The plane section rebuilt crossing points from the line parameter, dropping the offset **across**
+   the line — segments came out in the wrong place.
+4. Ear clipping tested containment against *all* loop vertices instead of the remaining ones, and a
+   hole bridged into one weakly simple loop produced triangles that overlapped instead of failing.
+5. Binary STL wrote `f64` and a 20-byte header, so no reader would accept the file.
+6. The containment ray solved the plane equation with the wrong dot product.
+7. A blend tool's end caps were read as world points instead of offsets from the edge, so every tool
+   was built off its own edge.
+
 ## Test evidence
 
 | Command | Result |
 |---|---|
 | `cargo test -p cadcraft-geom` | **108 passed**, 0 failed (was 84) |
 | `cargo test -p cadcraft-constraints` | **36 passed**, 0 failed |
+| `cargo test -p cadcraft-solid` | **47 passed**, 0 failed, **7 ignored** (named, run with `--ignored`) |
 | `cargo clippy -p cadcraft-geom --all-targets` | clean |
 | `cargo fmt -p cadcraft-geom` | applied |
 

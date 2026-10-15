@@ -150,12 +150,36 @@ pub struct Vec3 {
 
 impl Vec3 {
     pub const ZERO: Vec3 = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    pub const X: Vec3 = Vec3 { x: 1.0, y: 0.0, z: 0.0 };
+    pub const Y: Vec3 = Vec3 { x: 0.0, y: 1.0, z: 0.0 };
     pub const Z: Vec3 = Vec3 { x: 0.0, y: 0.0, z: 1.0 };
     pub const fn new(x: f64, y: f64, z: f64) -> Self {
         Vec3 { x, y, z }
     }
+    /// The three unit axes in order.
+    pub fn axes() -> [Vec3; 3] {
+        [Vec3::X, Vec3::Y, Vec3::Z]
+    }
+    /// Component `i` (`0`, `1`, `2`), or `0.0` out of range.
+    pub fn get(self, i: usize) -> f64 {
+        match i {
+            0 => self.x,
+            1 => self.y,
+            2 => self.z,
+            _ => 0.0,
+        }
+    }
     pub fn xy(self) -> Vec2 {
         Vec2::new(self.x, self.y)
+    }
+    /// Unit vector at `angle` radians.
+    pub fn from_angle(angle: f64) -> Self {
+        let (s, c) = angle.sin_cos();
+        Vec3::new(c, s, 0.0)
+    }
+    /// Angle of the direction from `self` to `o`, in `[0, 2π)`.
+    pub fn angle_to(self, o: Vec3) -> f64 {
+        crate::norm_angle((o - self).y.atan2((o - self).x))
     }
     pub fn dot(self, o: Vec3) -> f64 {
         self.x * o.x + self.y * o.y + self.z * o.z
@@ -167,12 +191,63 @@ impl Vec3 {
         // Avoid overflowing the squared components of large finite vectors.
         self.x.hypot(self.y).hypot(self.z)
     }
+    pub fn len2(self) -> f64 {
+        self.dot(self)
+    }
+    pub fn dist(self, o: Vec3) -> f64 {
+        (self - o).len()
+    }
+    /// Unit vector, or zero for a zero-length vector.
     pub fn normalized(self) -> Vec3 {
         let l = self.len();
         if l > crate::EPS { self * (1.0 / l) } else { Vec3::ZERO }
     }
+    /// Component-wise absolute value.
+    pub fn abs(self) -> Vec3 {
+        Vec3::new(self.x.abs(), self.y.abs(), self.z.abs())
+    }
+    /// Component-wise minimum.
+    pub fn min(self, o: Vec3) -> Vec3 {
+        Vec3::new(self.x.min(o.x), self.y.min(o.y), self.z.min(o.z))
+    }
+    /// Component-wise maximum.
+    pub fn max(self, o: Vec3) -> Vec3 {
+        Vec3::new(self.x.max(o.x), self.y.max(o.y), self.z.max(o.z))
+    }
+    pub fn lerp(self, o: Vec3, t: f64) -> Vec3 {
+        self + (o - self) * t
+    }
+    pub fn mid(self, o: Vec3) -> Vec3 {
+        Vec3::new(self.x.midpoint(o.x), self.y.midpoint(o.y), self.z.midpoint(o.z))
+    }
+    /// A vector of unit length perpendicular to `self` (zero for a non-finite or tiny input).
+    ///
+    /// Picks the world axis least aligned with `self` so the result never degenerates, which is
+    /// what makes frame construction reproducible.
+    pub fn any_perp(self) -> Vec3 {
+        let a = self.abs();
+        let least = if a.x <= a.y && a.x <= a.z {
+            Vec3::X
+        } else if a.y <= a.z {
+            Vec3::Y
+        } else {
+            Vec3::Z
+        };
+        self.cross(least).normalized()
+    }
     pub fn is_finite(self) -> bool {
         self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
+    }
+    /// Distance within `tol`, refusing to square (which overflows for large finite vectors).
+    pub fn near(self, o: Vec3, tol: f64) -> bool {
+        tol.is_finite() && tol >= 0.0 && self.dist(o) <= tol
+    }
+}
+
+impl Div<f64> for Vec3 {
+    type Output = Vec3;
+    fn div(self, s: f64) -> Vec3 {
+        if s == 0.0 { Vec3::ZERO } else { Vec3::new(self.x / s, self.y / s, self.z / s) }
     }
 }
 
