@@ -257,3 +257,39 @@ git log --oneline -5                      # last committed milestone
 cargo test -p cadcraft-solid -p cadcraft-model -p cadcraft-geom   # then "Next actions" above
 cargo run -p xtask -- layers              # 18 crates, no violations
 ```
+---
+
+## 2026-10-15 — parallel-agent pass (post-audit)
+
+Four subagents on strictly disjoint file partitions; the orchestrator verified every result itself.
+
+**Landed and verified:**
+- `crates/solid/src/step.rs` — STEP AP214 `FACETED_BREP` writer, 6 tests. Real part 21 output with a
+  shared vertex/edge table; the tests check the *entity graph* (every reference resolves, every
+  reference points backwards, only the two entry points are unreferenced). **No third-party STEP
+  reader has ever opened its output** — the module docs say so, and the file must be validated in the
+  CAD system it is meant for before anyone trusts it. Uses `ADVANCED_FACE` where AP214's
+  `faceted_brep` rule names `FACE_SURFACE` (a subtype relationship, not a verified import).
+- `crates/solid/tests/property.rs` — 12 randomized property tests, 11 s, fixed seeds. **4 fail on
+  purpose** and are not `#[ignore]`d: a green suite here would be a lie. They found three real
+  kernel defects, each with exact reproducing inputs in the failure message:
+  1. `revolve` closed no shell — `triangle_face` built a 2-point region, so every swept patch was
+     silently dropped (`Region::is_empty` is `outer.len() < 3`). Fixed; the caps still do not meet
+     the swept walls.
+  2. Union across a shared face plane left an open shell — `boolean.rs` dropped the plane whenever
+     the operands sat on opposite sides, which is right only when their sections coincide, so
+     stacking a box on *part* of another failed. Now two faces with opposite normals (a planar face
+     carries one normal); their junction with the neighbouring side face is still unwelded.
+  3. `union(a,b)` can succeed where `union(b,a)` fails (`seed 0xc0ffee42`). The existing
+     commutativity test compares volumes and never checks that both orders *succeed*.
+- `crates/render/src/scene3.rs` — camera / material / scene / workplane plus a CPU rasterizer with
+  back-face culling, depth buffer and flat shading. 17 tests, `cadcraft-render` now depends on
+  `cadcraft-solid` (L2 → L0, `xtask layers` accepts). Explicitly a geometry validator, not an
+  interactive viewport: no shadows, no PBR, no transparency, no spatial acceleration.
+
+**Corrections to my own audit.** I wrote that the kernel was "the most advanced and least risky
+block". That was wrong, and wrong for an instructive reason: it was the only block with no
+randomized tests, so 68 hand-written tests written alongside the code gave false confidence. Three
+fundamental defects survived them. The remaining risk is concentrated there, not in the UI.
+
+**In flight:** the engine-commands agent (`crates/engine/src/cmd/solid.rs`).
