@@ -126,6 +126,8 @@ solid that violates any of them is an error, never a body handed to the renderer
 | `cargo test -p cadcraft-solid` | **47 passed**, 0 failed, **7 ignored** (named, run with `--ignored`) |
 | `cargo clippy -p cadcraft-geom --all-targets` | clean |
 | `cargo fmt -p cadcraft-geom` | applied |
+| `cargo check --workspace --all-targets` | **passes**, 14m07s — the 2D app and apps are untouched |
+| `cargo run -p xtask -- layers` | **17 crates, no layering violations** (`solid` is L0 → `geom`) |
 
 Property tests added (deterministic seeded RNG, repo's existing xorshift):
 - `boolean_of_rectangles_matches_the_analytic_overlap` — 400 random rectangle pairs, union /
@@ -152,8 +154,25 @@ a notch on an edge, a square lying in a hole, tangency, determinism, scale invar
 
 ## Next actions
 
-1. Phase 0: run the baseline test suites, record timings, write `PROGRESS.md`, commit.
-2. Phase 1: `crates/geom/src/bool2d.rs`.
+Ordered by what unblocks the first end-to-end milestone (sketch → dimension → extrude → cut →
+change a dimension → recompute → save → reopen → verify).
+
+1. **Finish the boolean's coplanar-face merge** (`crates/solid/src/boolean.rs`). It is the one
+   defect standing between the kernel and working chamfers: a tool face lying in the plane of a
+   target face must be merged with it. Start by running `cargo test -p cadcraft-solid -- --ignored`
+   — the 7 ignored tests are the specification.
+2. **Feature tree** (`crates/model`, L3): parameters + expression, dirty propagation, rebuild
+   atomicity (keep the last good solid and the error on failure), geometric edge references.
+3. **Engine commands** (`crates/engine`): `solid.body.new`, `solid.feature.extrude|cut|chamfer|
+   fillet|revolve`, `solid.param.set|list`, `solid.export.stl|obj|step`, `solid.save|open`.
+   Commands must be JSON-only `CommandSpec`s with no `interactive` factory, so the `Vec2` prompt
+   protocol and the two global registry sweeps stay untouched.
+4. **Rendering + viewport** (`render::scene3`, CPU raster first; `ui-egui` orbit/pan/zoom, feature
+   tree and parameter panels, ray picking).
+5. **STEP AP214** export (`FACETED_BREP`), docs, `docs/solid-parity.md`, ROADMAP/gaps rows.
+
+Do **not** start the UI before the feature tree and commands work headlessly: this VM has no
+display, so every UI claim would be unverifiable.
 
 ## Resume instructions
 
