@@ -43,6 +43,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("fonts", Class::Layer(2)),
     ("render", Class::Layer(2)),
     ("io", Class::Layer(3)),
+    ("model", Class::Layer(3)),
     ("engine", Class::Layer(4)),
     ("ui-egui", Class::Layer(5)),
     ("mcp", Class::Layer(5)),
@@ -61,7 +62,6 @@ pub const TABLE: &[(&str, Class)] = &[
 /// backend (`gpu`) reuses the CPU reference (`compose`) for LUTs and parity
 /// tests.
 pub const INTRA_LAYER_ORDER: &[&[&str]] = &[&["geom", "color", "solid"], &["fonts", "render"]];
-
 fn intra_layer_allowed(from: &str, to: &str) -> bool {
     let (from, to) = (short_name(from), short_name(to));
     INTRA_LAYER_ORDER.iter().any(|chain| match (chain.iter().position(|n| *n == from), chain.iter().position(|n| *n == to)) {

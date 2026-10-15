@@ -689,6 +689,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cadcraft-model"
+version = "0.7.0"
+dependencies = [
+ "cadcraft-geom",
+ "cadcraft-solid",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "cadcraft-render"
 version = "0.7.0"
 dependencies = [

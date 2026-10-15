@@ -1,0 +1,16 @@
+[package]
+name = "cadcraft-model"
+description = "CADCraft parametric 3D model: feature tree, parameters, dirty propagation, atomic rebuild, versioned save and load"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cadcraft-geom = { workspace = true }
+cadcraft-solid = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
