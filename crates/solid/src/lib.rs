@@ -37,12 +37,22 @@
 //! - Planar faces only: rounds are faceted. `fillet` makes this explicit by taking a segment count.
 //! - Tolerance scales with the solid's size (`diagonal × 1e-9`, clamped to `[1e-12, 1e-3]`).
 //!   Features thinner than the tolerance are not resolved.
-//! - **Chamfer and fillet are implemented but not yet correct**: they are built as a tool and
-//!   subtracted with the ordinary boolean, and every result goes through validation, so a blend
-//!   that cannot be done is an error, never a broken body. The boolean's handling of a tool face
-//!   that lies in the plane of a target face is unfinished, so blends are currently refused.
 //! - Face, loop and triangle counts are capped ([`limits`]); oversized input is an error.
 //! - Nothing here can panic on hostile input: every entry point returns [`Result`] or [`Option`].
+//! - Edges are referenced by geometry ([`EdgeRef`]), never by index. There is no topological naming
+//!   scheme, so a reference that stops resolving is an error rather than a silently re-targeted
+//!   edge — see the crate's `chamfer` module for what that costs.
+//! - A blend that runs off the end of its edge *across* a face it was not asked to cut is refused
+//!   with a reason. Touching such a face is fine — the end cap of a blend usually lies exactly in
+//!   it — but crossing it needs three faces welded at one corner, which the boolean does not do.
+//!
+//! # What is verified
+//!
+//! Every operation here ends in [`Solid::validate`], so a shell that is open, inside-out, or
+//! inconsistently wound is an error rather than a body. On top of that the test suite pins the
+//! numbers: a chamfer of 2 on a 10-cube removes exactly 20, a fillet's removed cross-section is
+//! within a whisker of `4 − π`, a binary STL is 84 + 50n bytes of f32, and a mesh's volume agrees
+//! with the exact volume to 1e-9.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
@@ -76,6 +86,11 @@ pub mod limits {
     pub const MAX_FACES: usize = 60_000;
     /// Vertices in one face loop.
     pub const MAX_LOOP_VERTS: usize = 60_000;
+    /// Vertices a solid may carry for edges to still be welded after an operation.
+    ///
+    /// Welding is quadratic, so above this the result is left un-welded and validation decides
+    /// whether it is a shell anyway.
+    pub const MAX_WELD_VERTICES: usize = 20_000;
     /// Triangles in a tessellation.
     pub const MAX_TRIANGLES: usize = 2_000_000;
     /// Segments used to approximate a round edge.

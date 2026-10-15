@@ -314,6 +314,7 @@ pub fn stl_binary(mesh: &Mesh) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests_support::{box_at, must};
     use cadcraft_geom::{Region, Vec2};
 
     fn square(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Vec2> {
@@ -325,6 +326,46 @@ mod tests {
     /// the holes as material and hide the very bug it should catch.
     fn area_of(tris: &[[Vec2; 3]]) -> f64 {
         tris.iter().map(|t| (t[1] - t[0]).cross(t[2] - t[0]) * 0.5).sum()
+    }
+
+    fn f32_at(bytes: &[u8], at: usize) -> f32 {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[at..at + 4]);
+        f32::from_le_bytes(buf)
+    }
+
+    #[test]
+    fn a_binary_stl_has_the_layout_the_format_asks_for() {
+        // 80-byte header, a u32 count, then 50 bytes per facet. Writing f64 (96 bytes), or leaving
+        // the header short, makes a file that no reader accepts and that no test notices — this is
+        // the test that notices.
+        let s = box_at(Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0));
+        let mesh = must(mesh_from_solid(&s), "mesh");
+        let bytes = stl_binary(&mesh);
+        assert_eq!(bytes.len(), 84 + mesh.tris.len() * 50, "every facet is 50 bytes");
+        let count = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as usize;
+        assert_eq!(count, mesh.tris.len(), "the count matches the triangles written");
+        assert_eq!(bytes.len(), 84 + count * 50);
+        // Values are single precision: the first facet's normal and vertices have to read back as
+        // f32 numbers, not as half of an f64.
+        let first = &bytes[84..134];
+        let n = Vec3::new(f64::from(f32_at(first, 0)), f64::from(f32_at(first, 4)), f64::from(f32_at(first, 8)));
+        assert!((n.len() - 1.0).abs() < 1e-6, "a unit normal, got {n:?}");
+        let a = Vec3::new(f64::from(f32_at(first, 12)), f64::from(f32_at(first, 16)), f64::from(f32_at(first, 20)));
+        assert!(a.x >= -1.0 && a.x <= 3.0, "a vertex of the box, got {a:?}");
+        // The 2-byte attribute word is zeroed, as the spec's "attribute byte count" wants.
+        assert_eq!(&bytes[132..134], &[0, 0]);
+    }
+
+    #[test]
+    fn the_mesh_volume_matches_the_exact_volume_of_the_solid() {
+        // Two ways of measuring the same body: the pyramid sum from the faces, and tetrahedra from
+        // the triangles. They agree to a hair on a box; if they ever do not, one of them is lying.
+        let s = box_at(Vec3::new(-1.0, 2.0, 3.0), Vec3::new(2.0, 4.0, 5.0));
+        let mesh = must(mesh_from_solid(&s), "mesh");
+        let mesh_volume: f64 = mesh.triangles().map(|t| (t.a - s.bounds().min).cross(t.b - s.bounds().min).dot(t.c - s.bounds().min) / 6.0).sum();
+        assert!((mesh_volume - s.volume()).abs() < 1e-9, "mesh {mesh_volume} vs exact {}", s.volume());
+        assert!((s.volume() - 12.0).abs() < 1e-9, "a 3x2x2 box is 12");
     }
 
     #[test]

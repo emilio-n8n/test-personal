@@ -242,6 +242,29 @@ impl Vec3 {
     pub fn near(self, o: Vec3, tol: f64) -> bool {
         tol.is_finite() && tol >= 0.0 && self.dist(o) <= tol
     }
+    /// Rotated about `axis` by `angle` radians (Rodrigues' formula).
+    ///
+    /// `axis` need not be normalized. A zero axis or a non-finite angle leaves the vector alone, so
+    /// a caller that has not checked its input gets a point that still means something.
+    pub fn rotate_about(self, axis: Vec3, angle: f64) -> Vec3 {
+        let k = axis.normalized();
+        if k.len() < 0.5 || !angle.is_finite() {
+            return self;
+        }
+        let (s, c) = angle.sin_cos();
+        self * c + k.cross(self) * s + k * (k.dot(self) * (1.0 - c))
+    }
+    /// Signed angle from `self` to `o` about `axis`, in `(-π, π]`.
+    ///
+    /// The three-dimensional counterpart of [`Vec3::angle_to`], which only ever sweeps in the XY
+    /// plane and so silently gives the wrong answer for any other orientation.
+    pub fn signed_angle_about(self, o: Vec3, axis: Vec3) -> f64 {
+        let k = axis.normalized();
+        if k.len() < 0.5 {
+            return 0.0;
+        }
+        (k.dot(self.cross(o))).atan2(self.dot(o))
+    }
 }
 
 impl Div<f64> for Vec3 {
@@ -311,5 +334,42 @@ mod tests {
         assert!((unit.x - 0.6).abs() < 1e-12);
         assert!((unit.y - 0.8).abs() < 1e-12);
         assert!((unit.len() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rotating_about_an_axis_keeps_length_and_sweeps_the_right_way() {
+        let v = Vec3::new(1.0, 0.0, 0.0);
+        let quarter = v.rotate_about(Vec3::new(0.0, 0.0, 1.0), std::f64::consts::FRAC_PI_2);
+        assert!((quarter.len() - 1.0).abs() < 1e-12);
+        assert!(quarter.near(Vec3::new(0.0, 1.0, 0.0), 1e-12), "counter-clockwise about +Z");
+        // The axis need not be normalized, and rotating about a point off the vector's own
+        // perpendicular must swing it in the right plane.
+        let same = v.rotate_about(Vec3::new(0.0, 0.0, 7.0), std::f64::consts::PI);
+        assert!(same.near(Vec3::new(-1.0, 0.0, 0.0), 1e-12));
+        let y = Vec3::new(0.0, 1.0, 0.0);
+        assert!(y.rotate_about(Vec3::new(0.0, 1.0, 0.0), 1.0).near(y, 1e-12), "a vector on the axis does not move");
+    }
+
+    #[test]
+    fn rotating_with_a_degenerate_axis_or_angle_leaves_the_vector_alone() {
+        let v = Vec3::new(3.0, 4.0, 0.0);
+        assert!(v.rotate_about(Vec3::ZERO, 1.0).near(v, 0.0));
+        assert!(v.rotate_about(Vec3::new(0.0, 0.0, 1.0), f64::NAN).near(v, 0.0));
+    }
+
+    #[test]
+    fn a_signed_angle_is_measured_about_the_axis_it_is_given() {
+        let x = Vec3::new(1.0, 0.0, 0.0);
+        let y = Vec3::new(0.0, 1.0, 0.0);
+        let quarter = std::f64::consts::FRAC_PI_2;
+        assert!((x.signed_angle_about(y, Vec3::new(0.0, 0.0, 1.0)) - quarter).abs() < 1e-12);
+        assert!((y.signed_angle_about(x, Vec3::new(0.0, 0.0, 1.0)) + quarter).abs() < 1e-12);
+        // The same right angle in the XZ plane: a 2D-only angle reads this pair as `π`, which is the
+        // wrong answer, and the reason the fillet cross-section needed a three-dimensional arc.
+        let a = Vec3::new(1.0, 0.0, 0.0);
+        let b = Vec3::new(0.0, 0.0, -1.0);
+        assert!((a.signed_angle_about(b, Vec3::new(0.0, 1.0, 0.0)) - quarter).abs() < 1e-12);
+        assert!((a.angle_to(b) - std::f64::consts::PI).abs() < 1e-12, "the XY-plane angle is the one that is wrong");
+        assert!(a.signed_angle_about(b, Vec3::ZERO).abs() < f64::EPSILON, "no axis means no angle");
     }
 }

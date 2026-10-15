@@ -278,13 +278,34 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "pending: a plane through an exact edge or vertex is a degenerate section; the loop chaining loses half of it"]
     fn a_diagonal_plane_sections_the_box_as_a_rectangle() {
         let s = box_solid(Vec3::ZERO, Vec3::new(4.0, 4.0, 4.0));
+        // The plane x + y = 2 runs along the bottom face and meets two edges at exact vertices,
+        // which is the degenerate case: the section is only closed if the points on those vertices
+        // are used as the section's own corners rather than rebuilt from the crossing line.
         let Ok(plane) = Plane::new(Vec3::new(2.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 0.0)) else { panic!("plane") };
         let sec = must(section(&s, &plane, 1e-9), "section");
-        // The cut is 4 long in z and 4*sqrt(2) across the xy diagonal.
-        assert!((sec.region.area() - 4.0 * 4.0 * 2f64.sqrt()).abs() < 1e-6, "area {}", sec.region.area());
+        // 4 long in z, and the chord across the bottom face is from (2, 0) to (0, 2) — 2*sqrt(2).
+        let expected = 4.0 * 2.0 * 2f64.sqrt();
+        assert!((sec.region.area() - expected).abs() < 1e-9, "area {} expected {expected}", sec.region.area());
+        // The same cut, moved off the vertices by a hair, has to give the same answer: a section
+        // that changes shape when the plane moves by a millionth is not a section anybody can build
+        // a face from.
+        let Ok(nudged) = Plane::new(Vec3::new(2.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 0.0)) else { panic!("plane") };
+        let other = Plane::new(nudged.origin + nudged.u * 1e-7, nudged.normal).unwrap_or(nudged);
+        let sec2 = must(section(&s, &other, 1e-9), "section");
+        assert!((sec2.region.area() - expected).abs() < 1e-5, "a nudged plane gives {}", sec2.region.area());
+    }
+
+    #[test]
+    fn a_plane_through_a_vertex_only_never_panics() {
+        // x + y = 0 touches the box along one edge and nothing else. There is no area there, so the
+        // honest answer is an empty section; what matters is that it is an answer and not a panic.
+        let s = box_solid(Vec3::ZERO, Vec3::new(4.0, 4.0, 4.0));
+        let Ok(plane) = Plane::new(Vec3::ZERO, Vec3::new(1.0, 1.0, 0.0)) else { panic!("plane") };
+        if let Ok(sec) = section(&s, &plane, 1e-9) {
+            assert!(sec.region.area() <= 1e-9, "a tangent plane has no area: {}", sec.region.area());
+        }
     }
 
     #[test]

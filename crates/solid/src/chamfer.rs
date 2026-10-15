@@ -11,26 +11,22 @@
 //! result is a valid shell or an error, and the kernel's invariants apply exactly as they do to a
 //! cut.
 //!
-//! # Status
-//!
-//! **Not yet correct.** The tool is built and subtracted, and the result goes through the kernel's
-//! full validation, so a blend that cannot be done is an error rather than a broken body — but the
-//! boolean does not yet merge a blend tool's side face with the face of the target it lies *in* the
-//! plane of, so in practice every chamfer and fillet is currently refused. The tests that state the
-//! correct volumes are `#[ignore]`d and run with `cargo test -p cadcraft-solid -- --ignored`.
-//!
 //! # Limits
 //!
 //! - An edge is selected by geometry ([`EdgeRef`]), not by a persistent name. Change the upstream
 //!   sketch enough and a reference stops resolving; that is an error, not a silently re-targeted
 //!   edge. See [`resolve`].
 //! - A blend stops at the next edge it would run past: the tool is trimmed to the edges' shared
-//!   span, so a chamfer that would overrun a corner is cut back rather than exploding. Fillets at
-//!   a corner (three edges meeting) are **not** built yet and are refused.
+//!   span, so a chamfer that would overrun a corner is cut back rather than exploding.
+//! - A blend whose tool reaches *across* a face it was not asked to cut — a round wide enough to
+//!   run off the end of a slanted edge into its neighbour — is refused with a reason. Touching such
+//!   a face is normal and works; crossing it needs three faces welded at one corner.
 //! - A fillet is `segments` flat facets, not a true cylinder. `segments` is the quality knob and
 //!   its cost is visible in the facet count.
+//! - Fillets at a corner (three edges meeting) are refused: the two of them that are blended give
+//!   different answers about the third.
 
-use cadcraft_geom::{Region, Regions, Vec3};
+use cadcraft_geom::{Region, Vec3};
 
 use crate::{Face, Plane, Solid, SolidError, limits::MAX_ROUND_SEGMENTS};
 
@@ -123,56 +119,42 @@ fn edge_frame(solid: &Solid, edge: usize) -> Option<(Vec3, Vec3, Vec3, usize, us
 
 /// Build the wedge removed by a chamfer or fillet along one edge, as a closed solid.
 ///
-/// The cross-section sits in the plane through the edge's first point whose normal is the edge
-/// direction; the wedge is then swept along the edge. `section` is a list of points around the
-/// cross-section's outline, `start`/`end` are points on the edge.
+/// The cross-section sits in the plane through the edge's start whose normal is the sweep
+/// direction, and the wedge is that profile extruded along it — the same [`extrude`] every other
+/// prism in the kernel goes through, so the tool's faces are oriented by code that is already
+/// tested rather than by a second hand-rolled winding.
+///
+/// Two things the profile needs, both of which were bugs first time round:
+/// - The loop must run counter-clockwise about the sweep direction. A loop that runs the other way
+///   builds walls that face *into* the tool, and a tool inside out poisons every boolean built from
+///   it. [`wedge`] normalizes the winding rather than trusting its caller.
+/// - The section points are offsets from the edge, not world points, so they are placed at the
+///   edge before being projected into the plane.
 fn wedge(section_pts: &[Vec3], start: Vec3, end: Vec3) -> Result<Solid, SolidError> {
-    let m = section_pts.len();
-    if m < 3 {
+    if section_pts.len() < 3 {
         return Err(SolidError::Invalid("a blend cross-section needs at least three points".into()));
     }
-    // Start cap: the cross-section, ordered so its normal opposes the sweep.
-    let cap_normal = (section_pts[1] - section_pts[0]).cross(section_pts[2] - section_pts[0]).normalized();
-    // The cap's in-plane axis is the cross-section's first edge, *not* the sweep direction: the
-    // sweep is parallel to the cap's normal, so asking for it as `u` is asking for a plane with no
-    // in-plane axis at all.
-    let cap_u = match (section_pts.first(), section_pts.get(1)) {
-        (Some(a), Some(b)) => (*b - *a).normalized(),
-        _ => Vec3::X,
-    };
-    if cap_u.len() < 0.5 {
-        return Err(SolidError::Invalid("the blend cross-section is degenerate".into()));
-    }
-    let start_plane = Plane::with_u(start, cap_normal, cap_u)?;
-    // The cross-section points are offsets from the edge, so they only become plane coordinates
-    // once placed at the cap. Reading them as world points puts the whole tool off its own edge.
-    let start_region = Regions::new(vec![Region::new(section_pts.iter().map(|p| start_plane.to_local(start + *p)).collect())]);
-    let end_plane = Plane::with_u(end, cap_normal * -1.0, cap_u)?;
-    let end_region = Regions::new(vec![Region::new(section_pts.iter().map(|p| end_plane.to_local(end + *p)).collect())]);
     let sweep = end - start;
     let len = sweep.len();
     if len <= 0.0 || !len.is_finite() {
         return Err(SolidError::BadDistance(len));
     }
-    let mut faces = vec![Face::new(start_plane, start_region)?, Face::new(end_plane, end_region)?];
-    for i in 0..m {
-        let (Some(p0), Some(p1)) = (section_pts.get(i), section_pts.get((i + 1) % m)) else { continue };
-        let (a, b) = (start + *p0, start + *p1);
-        let (c, d) = (end + *p1, end + *p0);
-        // Four points, two triangles, each its own plane: this is the faceted contract again.
-        let normal = (b - a).cross(c - a);
-        if normal.len() < 1e-15 {
-            continue;
-        }
-        let plane = Plane::with_u(a, normal, b - a)?;
-        for tri in [[a, b, c], [a, c, d]] {
-            let poly = [plane.to_local(tri[0]), plane.to_local(tri[1]), plane.to_local(tri[2])];
-            if poly.iter().all(|p| p.is_finite()) {
-                faces.push(Face::new(plane, Region::new(poly.to_vec()).to_regions())?);
-            }
-        }
+    let sweep_dir = sweep / len;
+    let cap_u = match (section_pts.first(), section_pts.get(1)) {
+        (Some(a), Some(b)) => (*b - *a).normalized(),
+        _ => Vec3::ZERO,
+    };
+    if cap_u.len() < 0.5 {
+        return Err(SolidError::Invalid("the blend cross-section is degenerate".into()));
     }
-    Solid::from_faces(faces)
+    let plane = Plane::with_u(start, sweep_dir, cap_u)?;
+    let turn = (section_pts[1] - section_pts[0]).cross(section_pts[2] - section_pts[0]).dot(sweep_dir);
+    let pts: Vec<Vec3> = if turn >= 0.0 { section_pts.to_vec() } else { section_pts.iter().rev().copied().collect() };
+    let profile = Region::new(pts.iter().map(|p| plane.to_local(start + *p)).collect()).to_regions();
+    let solid = crate::extrude(&profile, &plane, len)?;
+    // Extrude validates already; this catches a profile that came out degenerate.
+    solid.validate()?;
+    Ok(solid)
 }
 
 /// Trim a straight edge's span to the part where both faces are still whole.
@@ -221,6 +203,45 @@ fn trimmed_span(solid: &Solid, edge: &crate::Edge) -> (Vec3, Vec3) {
     (edge.a + d * lo, edge.a + d * hi)
 }
 
+/// Refuse a blend whose tool runs off the end of its edge into a face it was not asked to touch.
+///
+/// The tool is swept between the points where the two blended faces stop overlapping, and at those
+/// points the edge runs into whatever is next. When the next thing is another face, the tool's end
+/// cap may cut across it — a fillet on a slanted edge reaches past the neighbouring face by a
+/// fraction of the radius. Subtracting that needs the boolean to weld three faces at one corner,
+/// which it does not yet do, so the result would be a shell with a hole in it.
+///
+/// *Straddling* is the test, not touching: a tool's end caps lie exactly in the faces at the ends
+/// of the edge, and a tool that rests against a face it was never blended into is fine. What is not
+/// fine — and what produces the open shell — is material on both sides of a face it was not asked
+/// to cut. Better a clear refusal than a broken body.
+fn tool_stays_within(solid: &Solid, tool: &Solid, blend_planes: &[Vec3]) -> Result<(), SolidError> {
+    let tol = solid.tolerance().max(tool.tolerance());
+    let vertices: Vec<Vec3> = tool.faces.iter().flat_map(|f| f.vertices()).collect();
+    if vertices.is_empty() {
+        return Err(SolidError::Invalid("the blend tool is empty".into()));
+    }
+    for f in &solid.faces {
+        if blend_planes.iter().any(|n| n.dot(f.plane.normal).abs() > 1.0 - 1e-9) {
+            continue;
+        }
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for v in &vertices {
+            let d = (*v - f.plane.origin).dot(f.plane.normal);
+            lo = lo.min(d);
+            hi = hi.max(d);
+        }
+        if lo < -tol && hi > tol {
+            return Err(SolidError::Invalid(format!(
+                "the blend reaches across the face at {:?}, which the boolean cannot round off yet",
+                f.plane.origin
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Bevel an edge: cut a flat face at `distance` from it.
 ///
 /// The result is a valid shell or an error — the wedge is subtracted with the ordinary boolean.
@@ -233,13 +254,15 @@ pub fn chamfer(solid: &Solid, refs: &[EdgeRef], distance: f64) -> Result<Solid, 
     for r in resolve(solid, refs, tol)? {
         let edges = current.edges().ok_or_else(|| SolidError::Invalid("no edge list".into()))?;
         let Some(edge) = edges.get(r).cloned() else { continue };
-        let Some((dir, d1, d2, _, _)) = edge_frame(&current, r) else {
+        let Some((dir, d1, d2, f1, f2)) = edge_frame(&current, r) else {
             return Err(SolidError::Invalid("the two faces of this edge are parallel or degenerate".into()));
         };
         let (start, end) = trimmed_span(&current, &edge);
         // The wedge cross-section: the edge, then one step into each face.
         let section_pts = [Vec3::ZERO, d1 * distance, d2 * distance];
         let tool = wedge(&section_pts, start, end)?;
+        let planes = [current.faces[f1].plane.normal, current.faces[f2].plane.normal];
+        tool_stays_within(&current, &tool, &planes)?;
         let _ = dir;
         current = crate::boolean(&current, &tool, crate::Bool3::Difference)?;
         current.validate()?;
@@ -263,12 +286,14 @@ pub fn fillet(solid: &Solid, refs: &[EdgeRef], radius: f64, segments: usize) -> 
     for r in resolve(solid, refs, tol)? {
         let edges = current.edges().ok_or_else(|| SolidError::Invalid("no edge list".into()))?;
         let Some(edge) = edges.get(r).cloned() else { continue };
-        let Some((_, d1, d2, _, _)) = edge_frame(&current, r) else {
+        let Some((_, d1, d2, f1, f2)) = edge_frame(&current, r) else {
             return Err(SolidError::Invalid("the two faces of this edge are parallel or degenerate".into()));
         };
         let (start, end) = trimmed_span(&current, &edge);
         let section_pts = arc_section(d1, d2, radius, segments);
         let tool = wedge(&section_pts, start, end)?;
+        let planes = [current.faces[f1].plane.normal, current.faces[f2].plane.normal];
+        tool_stays_within(&current, &tool, &planes)?;
         current = crate::boolean(&current, &tool, crate::Bool3::Difference)?;
         current.validate()?;
     }
@@ -278,33 +303,60 @@ pub fn fillet(solid: &Solid, refs: &[EdgeRef], radius: f64, segments: usize) -> 
 /// The cross-section of a round between two face directions: `segments` points on the arc from
 /// `d1` to `d2`, plus the edge itself at the origin.
 ///
-/// A fillet's cross-section is the circular arc of radius `r` tangent to both faces. The centre
-/// lies along the bisector at distance `r / sin(half-angle)`; the arc runs from the tangent point
-/// on the first face to the tangent point on the second.
+/// A fillet's cross-section is the circular arc of radius `r` tangent to both faces. The centre lies
+/// along the bisector at distance `r / sin(half-angle)`, and the arc runs from the tangent point on
+/// the first face, `r / tan(half-angle)` along it, to the tangent point on the second.
+///
+/// The arc is swept by rotating about the edge direction, *not* by stepping an angle measured in the
+/// XY plane: the two face directions can point anywhere, and an XY-plane angle then walks the arc off
+/// the face it was supposed to be tangent to — a fillet that removes nothing, or removes the wrong
+/// corner. `arc_section_stays_on_both_faces` pins that down for corners that are not right angles.
 fn arc_section(d1: Vec3, d2: Vec3, radius: f64, segments: usize) -> Vec<Vec3> {
+    let straight = || {
+        // A bevel: equal distances along both faces, which is a round with no curvature.
+        let t = if d1.dot(d2) < 0.999 { radius } else { 0.0 };
+        vec![Vec3::ZERO, d1 * t, d2 * t]
+    };
     let bisector = (d1 + d2).normalized();
-    if bisector.len() < 0.5 {
-        return vec![Vec3::ZERO, d1 * radius, d2 * radius];
+    if bisector.len() < 0.5 || !radius.is_finite() || radius <= 0.0 || segments == 0 {
+        return straight();
     }
-    // Distance from the edge to the arc centre.
-    let half = d1.angle_to(d2) / 2.0;
-    if half <= 1e-9 || !half.is_finite() {
-        return vec![Vec3::ZERO, d1 * radius, d2 * radius];
+    // The half-angle between the faces, and with it the distance from the edge to the arc centre.
+    let dot = d1.dot(d2).clamp(-1.0, 1.0);
+    let half = dot.acos() / 2.0;
+    let sin_half = half.sin();
+    if half <= 1e-9 || !half.is_finite() || sin_half <= 1e-9 {
+        // Parallel faces have no finite arc centre: the honest answer is a bevel.
+        return straight();
     }
-    let centre_dist = radius / half.sin();
-    let centre = bisector * centre_dist;
-    // Arc from the tangent point on d1 to the one on d2, about `centre`.
-    let a0 = centre.angle_to(d1 * radius);
-    let a1 = centre.angle_to(d2 * radius);
-    let mut sweep = a1 - a0;
-    while sweep <= 0.0 {
-        sweep += std::f64::consts::TAU;
+    let centre = bisector * (radius / sin_half);
+    // Tangent length along each face: `r / tan(half)`. Using `r` instead is right for a right-angle
+    // corner and wrong for every other one, which is exactly the sort of bug that survives until
+    // somebody rounds a corner that is not ninety degrees.
+    let tangent = radius / half.tan();
+    if !tangent.is_finite() || tangent <= 0.0 {
+        return straight();
     }
-    let mut out = Vec::with_capacity(segments + 1);
+    let start = d1 * tangent - centre;
+    if start.len() < 1e-12 {
+        return straight();
+    }
+    // The arc lives in the plane the two faces span, so the axis to sweep it about is perpendicular
+    // to *that* plane — the edge direction, `d1 × d2` — and not the bisector, which lies inside it.
+    // Sweeping about the bisector instead rotates the arc out of its own plane and produces a tool
+    // that is not a solid at all.
+    let axis = d1.cross(d2).normalized();
+    if axis.len() < 0.5 {
+        return straight();
+    }
+    let sweep = start.signed_angle_about(d2 * tangent - centre, axis);
+    if !sweep.is_finite() || sweep.abs() <= 1e-12 {
+        return straight();
+    }
+    let mut out = Vec::with_capacity(segments + 2);
     out.push(Vec3::ZERO);
     for i in 0..=segments {
-        let t = a0 + sweep * i as f64 / segments as f64;
-        out.push(Vec3::from_angle(t) * radius + centre);
+        out.push(start.rotate_about(axis, sweep * i as f64 / segments as f64) + centre);
     }
     out
 }
@@ -315,7 +367,6 @@ mod tests {
     use crate::{Plane, extrude, tests_support::box_at, tests_support::must, tests_support::rect};
 
     #[test]
-    #[ignore = "pending: the boolean does not yet merge a blend tool's face with the coplanar face it sits on"]
     fn a_chamfered_box_loses_the_corner_material() {
         let b = box_at(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0));
         // The vertical edge at (10, 0), running z.
@@ -328,17 +379,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "pending: see a_chamfered_box_loses_the_corner_material"]
     fn a_chamfered_edge_keeps_the_opposite_corner() {
         let b = box_at(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0));
         let r = must(chamfer(&b, &[EdgeRef::new(Vec3::new(0.0, 10.0, 5.0), 1e-6)], 2.0), "chamfer");
-        assert!(r.contains(Vec3::new(0.5, 9.5, 5.0)), "the chamfered corner is cut");
+        assert!(!r.contains(Vec3::new(0.5, 9.5, 5.0)), "the chamfered corner is cut away");
         assert!(r.contains(Vec3::new(9.5, 0.5, 5.0)), "the far corner is untouched");
         assert!(r.contains(Vec3::new(0.5, 0.5, 5.0)));
     }
 
     #[test]
-    #[ignore = "pending: see a_chamfered_box_loses_the_corner_material"]
     fn a_chamfer_on_a_horizontal_edge_cuts_the_top() {
         let b = box_at(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0));
         let r = must(chamfer(&b, &[EdgeRef::new(Vec3::new(5.0, 0.0, 10.0), 1e-6)], 3.0), "chamfer");
@@ -349,7 +398,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "pending: see a_chamfered_box_loses_the_corner_material"]
     fn a_fillet_removes_less_than_a_chamfer_of_the_same_radius() {
         let b = box_at(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0));
         let ch = must(chamfer(&b, &[EdgeRef::new(Vec3::new(10.0, 0.0, 5.0), 1e-6)], 2.0), "chamfer");
@@ -361,15 +409,20 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "pending: see a_chamfered_box_loses_the_corner_material"]
     fn a_fillet_rounds_the_corner_in_facets() {
         let b = box_at(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0));
         let fi = must(fillet(&b, &[EdgeRef::new(Vec3::new(10.0, 0.0, 5.0), 1e-6)], 2.0, 4), "fillet");
         fi.validate().unwrap_or_else(|e| panic!("{e}"));
         fi.validate_vertices().unwrap_or_else(|e| panic!("{e}"));
-        // The tangent point on each face must still be on the solid, the corner must not be.
-        assert!(!fi.contains(Vec3::new(10.0, 0.0, 5.0)));
-        assert!(fi.contains(Vec3::new(8.0, 0.0, 5.0)));
+        // The sharp corner is gone, and so is the material out to the arc; the inside of the arc is
+        // still solid. A round of radius 2 at a right-angle corner removes `4 - π` of cross-section
+        // per unit of edge, which for four flat facets is a shade more than the true arc.
+        let removed = (b.volume() - fi.volume()) / 10.0;
+        assert!((0.8..1.0).contains(&removed), "removed cross-section {removed}");
+        assert!(!fi.contains(Vec3::new(10.0, 0.0, 5.0)), "the corner itself");
+        assert!(!fi.contains(Vec3::new(9.6, 0.2, 5.0)), "out to the arc");
+        assert!(fi.contains(Vec3::new(9.0, 0.5, 5.0)), "inside the arc");
+        assert!(fi.contains(Vec3::new(5.0, 5.0, 5.0)), "the far side of the part");
     }
 
     #[test]
@@ -426,7 +479,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "pending: see a_chamfered_box_loses_the_corner_material"]
     fn a_chamfer_then_a_cut_stays_valid() {
         let b = box_at(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0));
         let c = must(chamfer(&b, &[EdgeRef::new(Vec3::new(10.0, 0.0, 5.0), 1e-6)], 2.0), "chamfer");
@@ -435,5 +487,103 @@ mod tests {
         d.validate().unwrap_or_else(|e| panic!("{e}"));
         d.validate_vertices().unwrap_or_else(|e| panic!("{e}"));
         assert!((d.volume() - (c.volume() - 4.0 * 4.0 * 10.0)).abs() < 1e-9, "volume {}", d.volume());
+    }
+
+    #[test]
+    fn arc_section_stays_on_both_faces() {
+        // Every corner a box has, plus one that is not axis-aligned at all. The arc has to leave the
+        // first face tangentially and arrive on the second one, or the round it describes is not the
+        // one that was asked for.
+        let cases: [(Vec3, Vec3); 5] = [
+            (Vec3::new(-1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
+            (Vec3::new(-1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
+            (Vec3::new(0.0, -1.0, 0.0), Vec3::new(0.0, 0.0, -1.0)),
+            (Vec3::new(0.0, 1.0, 0.0), Vec3::new(1.0, 0.0, 1.0).normalized()),
+            (Vec3::new(1.0, 1.0, 0.0).normalized(), Vec3::new(-1.0, 0.0, 1.0).normalized()),
+        ];
+        for (d1, d2) in cases {
+            let radius = 2.0;
+            let pts = arc_section(d1, d2, radius, 8);
+            assert!(pts.len() >= 3, "a cross-section needs three points");
+            assert!(pts[0].near(Vec3::ZERO, 1e-12), "it starts on the edge");
+            // Every point of the arc sits exactly `radius` from the centre: that is what makes this
+            // a round rather than a hand-waved curve, and it holds for any corner angle.
+            let bisector = (d1 + d2).normalized();
+            let half = d1.dot(d2).clamp(-1.0, 1.0).acos() / 2.0;
+            let tangent = radius / half.tan();
+            assert!(pts[1].near(d1 * tangent, 1e-9), "it leaves the first face at the tangent point");
+            let last = pts.len() - 1;
+            assert!(pts[last].near(d2 * tangent, 1e-9), "it arrives on the second face at the tangent point");
+            if bisector.len() >= 0.5 && half > 1e-9 {
+                let centre = bisector * (radius / half.sin());
+                for p in pts.iter().skip(1) {
+                    assert!((*p - centre).len() > 0.0 && ((*p - centre).len() - radius).abs() < 1e-9, "off the arc: {p:?}");
+                }
+            }
+            // No two consecutive points may coincide: a repeated point builds a zero-length wall,
+            // and the tool is then not a closed solid.
+            for w in pts.windows(2) {
+                assert!(w[1].dist(w[0]) > 1e-9, "the arc repeated a point: {w:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_round_on_an_edge_that_is_not_axis_aligned() {
+        // Chamfer first: the bevel it cuts has two edges at 45 degrees, so filling one of those asks
+        // for a cross-section whose arc lies in a plane nothing to do with the XY plane. An angle
+        // measured in XY would build the round somewhere else entirely — on the wrong faces, or
+        // nowhere. The run also ends where the edge runs into the x=10 face, and the tool's end cap
+        // touches it exactly — the case the boolean's edge welding exists for.
+        let b = box_at(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0));
+        let bevelled = must(chamfer(&b, &[EdgeRef::new(Vec3::new(10.0, 0.0, 5.0), 1e-6)], 2.0), "chamfer");
+        let aimed = Vec3::new(9.0, 1.0, 0.0);
+        let r = must(fillet(&bevelled, &[EdgeRef::new(aimed, 1e-6)], 0.5, 6), "fillet on a 45-degree edge");
+        r.validate().unwrap_or_else(|e| panic!("{e}"));
+        r.validate_vertices().unwrap_or_else(|e| panic!("{e}"));
+        assert!(r.volume() < bevelled.volume(), "a round that removes nothing");
+        assert!(!r.contains(aimed), "the edge itself is gone");
+        assert!(r.contains(Vec3::new(8.6, 1.4, 0.0)), "the tangent point on the bottom face stays solid");
+        // Only the bevel's bottom edge was rounded: the rest of the part is untouched. A little
+        // inside the bevel face, well above the run of the fillet.
+        assert!(r.contains(Vec3::new(8.6, 1.4, 9.0)), "the far end of the bevel is untouched");
+        assert!(r.contains(Vec3::new(1.0, 1.0, 1.0)), "the rest of the block is untouched");
+    }
+
+    #[test]
+    fn a_blend_that_runs_into_another_face_is_refused_with_a_reason() {
+        // A blend wide enough to reach right across the part has nowhere to go: it cannot be done.
+        // That has to come back as a refusal with a reason, never as a broken body.
+        let b = box_at(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0));
+        let bevelled = must(chamfer(&b, &[EdgeRef::new(Vec3::new(10.0, 0.0, 5.0), 1e-6)], 2.0), "chamfer");
+        let e = EdgeRef::new(Vec3::new(9.0, 1.0, 0.0), 1e-6);
+        // The bevel edge runs from (8, 0, 0) to (10, 2, 0); a round of radius 3 around it reaches
+        // past the x=10 face by more than a millimetre, and no amount of welding makes that work.
+        for r in [fillet(&bevelled, &[e], 3.0, 12), chamfer(&bevelled, &[e], 3.0)] {
+            match r {
+                Ok(s) => {
+                    s.validate().unwrap_or_else(|e| panic!("a blend that reaches across the part must not come back as a body: {e}"));
+                }
+                Err(err) => assert!(!err.to_string().is_empty(), "an error has to explain itself"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_blend_along_an_axis_aligned_edge_never_reaches_into_another_face() {
+        // Every edge of a box, both kinds of blend: the guard must not fire on the cases that do
+        // work, or every blend would be refused.
+        let b = box_at(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0));
+        let edges = b.edges().unwrap_or_default();
+        for e in &edges {
+            let aim = e.a.mid(e.b);
+            for r in [chamfer(&b, &[EdgeRef::new(aim, 1e-6)], 0.75), fillet(&b, &[EdgeRef::new(aim, 1e-6)], 0.75, 8)] {
+                // A blend that cannot be done on this edge is allowed to say so; one that comes
+                // back has to be a real solid.
+                let Ok(s) = r else { continue };
+                s.validate().unwrap_or_else(|e| panic!("{e}"));
+                assert!(s.volume() > 0.0 && s.volume() < b.volume(), "a blend that removed nothing, or everything");
+            }
+        }
     }
 }

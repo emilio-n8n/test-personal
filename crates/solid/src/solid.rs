@@ -159,6 +159,274 @@ impl Face {
     }
 }
 
+/// Snap every vertex onto a shared grid and split every face edge at any vertex that lands on it.
+///
+/// Two faces share a boundary when their edges coincide. When one face has been split at a vertex
+/// the other has not — because the other was merely *touched* there, rather than cut — the two
+/// edges no longer match, and the shell reports an edge used once. This is that mismatch's repair.
+///
+/// Snapping comes first, and is not optional. The same corner arrives at two faces by different
+/// routes and lands a ten-millionth of a unit apart; split one face at that corner and not the
+/// other and the weld has *created* the mismatch it was meant to remove. So every vertex is first
+/// moved onto a `tol`-sized grid and replaced by the canonical point for its cell, which is the
+/// same number in every face that has it.
+///
+/// The inserted vertices are collinear, so no region changes shape and no area or volume moves; the
+/// point is that the *edges* then match their neighbours, which is what the shell is made of.
+///
+/// Quadratic in faces × edges × vertices, and skipped above [`MAX_WELD_VERTICES`] rather than
+/// spending a minute on a body nobody can look at.
+pub fn weld_edges(faces: &mut [Face], tol: f64) -> usize {
+    let total: usize = faces.iter().map(|f| f.vertices().len()).sum();
+    if total > crate::limits::MAX_WELD_VERTICES {
+        return 0;
+    }
+    // Phase 1: one canonical position per grid cell.
+    let origin = faces.iter().flat_map(|f| f.vertices()).fold(Vec3::ZERO, |acc, v| acc.min(v));
+    let cell = |v: Vec3| -> (i64, i64, i64) {
+        let s = if tol > 0.0 { 1.0 / tol } else { 1e12 };
+        (((v.x - origin.x) * s).round() as i64, ((v.y - origin.y) * s).round() as i64, ((v.z - origin.z) * s).round() as i64)
+    };
+    let mut canonical: std::collections::BTreeMap<(i64, i64, i64), Vec3> = std::collections::BTreeMap::new();
+    for f in faces.iter() {
+        for v in f.vertices() {
+            canonical.entry(cell(v)).or_insert(v);
+        }
+    }
+    let vertices: Vec<Vec3> = canonical.values().copied().collect();
+    for f in faces.iter_mut() {
+        let plane = f.plane;
+        for region in f.region.regions_mut() {
+            for loop_pts in std::iter::once(&mut region.outer).chain(region.holes.iter_mut()) {
+                for p in loop_pts.iter_mut() {
+                    let w = plane.to_world(p.x, p.y);
+                    let hit = canonical.get(&cell(w)).copied().unwrap_or(w);
+                    *p = plane.to_local(hit);
+                }
+            }
+        }
+    }
+    // Phase 2: split edges at the vertices that lie on them.
+    let mut added = 0;
+    for f in faces.iter_mut() {
+        let plane = f.plane;
+        let mut splits = 0;
+        for region in f.region.regions_mut() {
+            for loop_pts in std::iter::once(&mut region.outer).chain(region.holes.iter_mut()) {
+                let n = loop_pts.len();
+                if n < 3 {
+                    continue;
+                }
+                let mut out: Vec<Vec2> = Vec::with_capacity(n);
+                for i in 0..n {
+                    let a = loop_pts[i];
+                    let b = loop_pts[(i + 1) % n];
+                    out.push(a);
+                    let dir = b - a;
+                    let len2 = dir.len2();
+                    if len2 <= tol * tol {
+                        continue;
+                    }
+                    // Vertices strictly between `a` and `b`, and on the segment to within `tol`.
+                    let mut inner: Vec<(f64, Vec2)> = Vec::new();
+                    for v in &vertices {
+                        // Only a vertex *in this face's plane* may split one of its edges. Testing
+                        // the projection alone is not enough, and it is quietly wrong for every
+                        // axis-aligned part: a vertex off the plane projects exactly onto the
+                        // edges, so a box would sprout midpoints along all of them.
+                        if plane.distance(*v).abs() > tol {
+                            continue;
+                        }
+                        let w = plane.to_local(*v) - a;
+                        let t = w.dot(dir) / len2;
+                        if t <= 0.0 || t >= 1.0 {
+                            continue;
+                        }
+                        let off = (w - dir * t).len();
+                        if off > tol {
+                            continue;
+                        }
+                        inner.push((t, a + dir * t));
+                    }
+                    if inner.is_empty() {
+                        continue;
+                    }
+                    inner.sort_by(|x, y| x.0.total_cmp(&y.0));
+                    let mut last = 0.0;
+                    for (t, p) in inner {
+                        if t - last <= f64::EPSILON {
+                            continue;
+                        }
+                        last = t;
+                        out.push(p);
+                        splits += 1;
+                    }
+                }
+                *loop_pts = out;
+            }
+        }
+        added += splits;
+    }
+    added
+}
+
+#[cfg(test)]
+mod invariant_tests {
+    use super::*;
+    use crate::tests_support::box_at;
+
+    fn flat_face(normal: Vec3) -> Option<Face> {
+        let plane = Plane::new(Vec3::ZERO, normal).ok()?;
+        Face::new(plane, Regions::new(vec![Region::new(vec![Vec2::new(0.0, 0.0), Vec2::new(4.0, 0.0), Vec2::new(4.0, 4.0), Vec2::new(0.0, 4.0)])]))
+            .ok()
+    }
+
+    #[test]
+    fn flipping_a_face_reverses_its_loop_as_well_as_its_normal() {
+        // The loop's winding *is* what makes the normal point out of the material. Reversing only
+        // the normal leaves a face whose area comes out negative, which is how a flipped face once
+        // quietly subtracted material instead of adding it.
+        let Some(face) = flat_face(Vec3::Z) else { return };
+        let flipped = match face.flipped() {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        assert!((flipped.plane.normal.dot(face.plane.normal) + 1.0).abs() < 1e-9, "the normal turned around");
+        assert!(flipped.region.iter().next().is_some_and(|r| r.signed_area() > 0.0), "the loop is still counter-clockwise in its own frame");
+        assert!((flipped.area() - 16.0).abs() < 1e-9, "the same shape, just the other way round");
+        // Same geometry: the points are there, only in the other order.
+        let mut a = face.vertices();
+        let mut b = flipped.vertices();
+        a.sort_by(|p, q| p.x.total_cmp(&q.x).then(p.y.total_cmp(&q.y)).then(p.z.total_cmp(&q.z)));
+        b.sort_by(|p, q| p.x.total_cmp(&q.x).then(p.y.total_cmp(&q.y)).then(p.z.total_cmp(&q.z)));
+        assert_eq!(a, b, "flipping moves nothing");
+    }
+
+    #[test]
+    fn a_shell_with_a_hole_is_not_a_solid() {
+        // Three faces of a box: closed on two sides, open on the third. Every edge rule still holds
+        // except the last, and that is exactly what has to catch it.
+        let b = box_at(Vec3::ZERO, Vec3::new(4.0, 4.0, 4.0));
+        let mut faces = b.faces.clone();
+        faces.pop();
+        let s = Solid::from_faces(faces).unwrap_or_default();
+        match s.validate() {
+            Err(SolidError::OpenEdge(_, _, n)) => assert_eq!(n, 1, "one face is missing"),
+            Err(other) => panic!("expected an open edge, got {other}"),
+            Ok(()) => panic!("a shell with a hole passed validation"),
+        }
+    }
+
+    #[test]
+    fn a_shell_pointing_inward_is_not_a_solid() {
+        // Closed, consistent, but inside out: the signed volume comes out negative. This is the
+        // check that catches a boolean that got the ownership rule backwards.
+        let b = box_at(Vec3::ZERO, Vec3::new(4.0, 4.0, 4.0));
+        let inside_out = b.flipped().unwrap_or_else(|_| b.clone());
+        match inside_out.validate() {
+            Err(SolidError::NonPositiveVolume(v)) => assert!(v < 0.0, "a negative volume, got {v}"),
+            Err(other) => panic!("expected a non-positive volume, got {other}"),
+            Ok(()) => panic!("a shell pointing inward passed validation"),
+        }
+        assert!((inside_out.volume() + b.volume()).abs() < 1e-9, "the same material, the other way round: {} vs {}", inside_out.volume(), b.volume());
+    }
+
+    #[test]
+    fn two_boxes_touching_at_a_face_are_not_one_solid() {
+        // Closed and consistently oriented, but pinched: the fans around the shared vertices are
+        // two cycles instead of one. Only the vertex check catches this, which is why it exists.
+        let a = box_at(Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0));
+        let b = box_at(Vec3::new(2.0, 0.0, 0.0), Vec3::new(4.0, 2.0, 2.0));
+        let mut faces = a.faces.clone();
+        faces.extend(b.faces.iter().cloned());
+        let joined = Solid::from_faces(faces).unwrap_or_default();
+        match joined.validate_vertices() {
+            Err(e) => assert!(e.to_string().contains("pinched"), "expected a pinched vertex, got {e}"),
+            Ok(()) => panic!("two boxes touching at a face are not one manifold solid"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod weld_tests {
+    use super::*;
+    use crate::tests_support::box_at;
+
+    fn square_on(plane: Plane, points: [Vec3; 4]) -> Option<Face> {
+        Face::new(plane, Regions::new(vec![Region::new(points.iter().map(|p| plane.to_local(*p)).collect())])).ok()
+    }
+
+    #[test]
+    fn welding_inserts_a_vertex_that_lands_on_another_faces_edge() {
+        // The flat face spans an edge whole; a face standing on that edge already has a vertex in
+        // the middle of it. Left alone, the two do not share an edge any more and the shell reads
+        // as having one used once — which is exactly what a blend tool touching a face used to do.
+        let flat = match Plane::new(Vec3::ZERO, Vec3::Z) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let upright = match Plane::new(Vec3::ZERO, Vec3::Y) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let Some(a) = square_on(flat, [Vec3::ZERO, Vec3::new(4.0, 0.0, 0.0), Vec3::new(4.0, 4.0, 0.0), Vec3::new(0.0, 4.0, 0.0)]) else {
+            return;
+        };
+        let Some(b) = square_on(upright, [Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 2.0), Vec3::ZERO]) else {
+            return;
+        };
+        let mut faces = vec![a, b];
+        assert_eq!(weld_edges(&mut faces, 1e-9), 1, "the point at (2, 0, 0) splits the flat face's edge");
+        let flat_edges = faces[0].edges();
+        assert!(
+            flat_edges.iter().any(|(p, q)| p.near(Vec3::new(2.0, 0.0, 0.0), 1e-9) || q.near(Vec3::new(2.0, 0.0, 0.0), 1e-9)),
+            "the flat face now has a vertex there: {flat_edges:?}"
+        );
+    }
+
+    #[test]
+    fn welding_ignores_a_vertex_that_is_not_in_the_face() {
+        // A vertex one unit *above* the plane projects exactly onto the middle of that face's
+        // edge, because boxes are axis-aligned. Projecting without checking the plane first is how
+        // a solid grew midpoints along every edge it had.
+        let flat = match Plane::new(Vec3::ZERO, Vec3::Z) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let upper = match Plane::new(Vec3::new(0.0, 0.0, 5.0), Vec3::Z) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let Some(a) = square_on(flat, [Vec3::ZERO, Vec3::new(4.0, 0.0, 0.0), Vec3::new(4.0, 4.0, 0.0), Vec3::new(0.0, 4.0, 0.0)]) else {
+            return;
+        };
+        let Some(b) = square_on(upper, [Vec3::new(2.0, 0.0, 5.0), Vec3::new(6.0, 0.0, 5.0), Vec3::new(6.0, 4.0, 5.0), Vec3::new(2.0, 4.0, 5.0)])
+        else {
+            return;
+        };
+        let mut faces = vec![a, b];
+        assert_eq!(weld_edges(&mut faces, 1e-9), 0, "a vertex in another plane cannot split this face");
+    }
+
+    #[test]
+    fn welding_changes_no_area_or_volume() {
+        // The inserted points are collinear, so a welded solid is the same solid. Anything else
+        // would mean the pass moves geometry, which it must never do.
+        let b = box_at(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0));
+        let mut faces = b.faces.clone();
+        let before_area: f64 = faces.iter().map(|f| f.area()).sum();
+        let before_volume = b.volume();
+        let before: Vec<Vec<Vec2>> = b.faces.iter().flat_map(|f| f.region.loops().cloned()).collect();
+        weld_edges(&mut faces, b.tolerance());
+        let after_area: f64 = faces.iter().map(|f| f.area()).sum();
+        assert!((after_area - before_area).abs() < 1e-9, "area moved: {before_area} -> {after_area}");
+        let after = Solid::from_faces(faces).unwrap_or_default();
+        assert!((after.volume() - before_volume).abs() < 1e-9, "volume moved: {before_volume} -> {}", after.volume());
+        let after_loops: Vec<Vec<Vec2>> = after.faces.iter().flat_map(|f| f.region.loops().cloned()).collect();
+        assert_eq!(before, after_loops, "a box has nothing to weld, and comes back the same loops");
+    }
+}
+
 /// A closed shell of planar faces.
 ///
 /// Faces carry no topology of their own; the shared boundary between faces is the topology, and
@@ -188,6 +456,18 @@ impl Solid {
 
     pub fn bounds(&self) -> Bounds3 {
         Bounds3::from_points(self.faces.iter().flat_map(|f| f.vertices()))
+    }
+
+    /// The same shell with every face turned the other way: the same solid seen from inside.
+    ///
+    /// Its volume comes out negative, which is the cheapest way to see that orientation is a real
+    /// property and not a convention: the same faces, the same numbers, the other way round.
+    pub fn flipped(&self) -> Result<Solid, SolidError> {
+        let mut faces = Vec::with_capacity(self.faces.len());
+        for f in &self.faces {
+            faces.push(f.flipped()?);
+        }
+        Solid::from_faces(faces)
     }
 
     /// Working tolerance: scaled to the solid so the same shape behaves the same at every size.
@@ -298,8 +578,12 @@ impl Solid {
             }
         }
         // I2 + I3: every edge exactly twice, once in each direction.
-        let mut usage: std::collections::HashMap<((i64, i64, i64), (i64, i64, i64)), Vec<(usize, bool, Vec3, Vec3)>> =
-            std::collections::HashMap::new();
+        //
+        // A `BTreeMap`, not a `HashMap`: the report is the *first* offending edge in iteration
+        // order, and hash order changes from run to run. A kernel that names a different broken
+        // edge each time it is asked is one nobody can debug.
+        let mut usage: std::collections::BTreeMap<((i64, i64, i64), (i64, i64, i64)), Vec<(usize, bool, Vec3, Vec3)>> =
+            std::collections::BTreeMap::new();
         for (fi, f) in self.faces.iter().enumerate() {
             for (a, b) in f.edges() {
                 let (ka, kb) = (vkey(a, bb.min, tol), vkey(b, bb.min, tol));
@@ -345,8 +629,10 @@ impl Solid {
     pub fn validate_vertices(&self) -> Result<(), SolidError> {
         let tol = self.tolerance();
         let bb = self.bounds();
-        // vertex -> the faces touching it, with a representative position for the fan check
-        let mut fans: std::collections::HashMap<(i64, i64, i64), (Vec3, Vec<usize>)> = std::collections::HashMap::new();
+        // vertex -> the faces touching it, with a representative position for the fan check.
+        // Ordered, for the same reason `validate` is: the report names one vertex, and it must be
+        // the same one every time.
+        let mut fans: std::collections::BTreeMap<(i64, i64, i64), (Vec3, Vec<usize>)> = std::collections::BTreeMap::new();
         for (fi, f) in self.faces.iter().enumerate() {
             for v in f.vertices() {
                 fans.entry(vkey(v, bb.min, tol)).or_insert((v, Vec::new())).1.push(fi);

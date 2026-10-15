@@ -129,6 +129,9 @@ pub fn boolean(a: &Solid, b: &Solid, op: Bool3) -> Result<Solid, SolidError> {
         faces.push(Face::new(*p, region)?);
     }
     let mut solid = Solid::from_faces(faces)?;
+    // Faces that a tool only *touched* keep their whole loop, while the faces around the touch are
+    // split there. Weld before validating, or the shell reads as having an edge used once.
+    crate::solid::weld_edges(&mut solid.faces, tol);
     solid.orient_faces()?;
     solid.validate()?;
     Ok(solid)
@@ -266,6 +269,20 @@ mod tests {
     }
 
     #[test]
+    fn booleans_with_an_empty_operand_follow_the_algebra() {
+        // Subtracting nothing must leave everything. It once returned the empty result instead,
+        // which is the sort of bug that erases a drawing without ever saying so.
+        let a = box_at(Vec3::ZERO, Vec3::new(4.0, 3.0, 2.0));
+        let empty = Solid::default();
+        let d = must(boolean(&a, &empty, Bool3::Difference), "difference with nothing");
+        assert!((d.volume() - a.volume()).abs() < 1e-9, "volume {}", d.volume());
+        let u = must(boolean(&a, &empty, Bool3::Union), "union with nothing");
+        assert!((u.volume() - a.volume()).abs() < 1e-9, "volume {}", u.volume());
+        assert!(boolean(&a, &empty, Bool3::Intersect).is_err(), "there is nothing to intersect with");
+        assert!(boolean(&empty, &a, Bool3::Intersect).is_err(), "and nothing the other way either");
+    }
+
+    #[test]
     fn booleans_at_a_large_scale_keep_their_volume() {
         let base = Vec3::new(1e5, -1e5, 1e5);
         let a = box_at(base, base + Vec3::new(10.0, 10.0, 10.0));
@@ -273,55 +290,5 @@ mod tests {
         let d = must(boolean(&a, &b, Bool3::Difference), "difference");
         // A is 10x10x10 and the corner 5x5x5 of it lies inside B.
         assert!((d.volume() - 875.0).abs() < 1e-6, "volume {}", d.volume());
-    }
-}
-
-#[cfg(test)]
-mod debug_tests {
-    use super::*;
-    use crate::{
-        Plane, extrude,
-        section::section,
-        tests_support::{must, rect},
-    };
-
-    #[test]
-    fn debug_pocket2() {
-        let plate = must(extrude(&rect(0.0, 0.0, 20.0, 20.0), &Plane::xy(0.0), 4.0), "plate");
-        let tool = must(extrude(&rect(5.0, 5.0, 15.0, 15.0), &Plane::xy(-1.0), 10.0), "tool");
-        let tol = plate.tolerance().max(tool.tolerance());
-        println!("plate tol {:e} tool tol {:e}", plate.tolerance(), tool.tolerance());
-        let mut planes: Vec<(Plane, bool, bool)> = Vec::new();
-        for (s, is_a) in [(&plate, true), (&tool, false)] {
-            for f in &s.faces {
-                match planes.iter_mut().find(|(p, _, _)| p.coplanar(&f.plane, tol, 1e-9)) {
-                    Some((_, fa, fb)) => {
-                        if is_a {
-                            *fa = true
-                        } else {
-                            *fb = true
-                        }
-                    }
-                    None => planes.push((f.plane, is_a, !is_a)),
-                }
-            }
-        }
-        for (p, ao, bo) in &planes {
-            let sa = section(&plate, p, tol).map(|s| s.region).unwrap_or_default();
-            let sb = section(&tool, p, tol).map(|s| s.region).unwrap_or_default();
-            println!(
-                "plane n={:?} o={:?} a={ao} b={bo} sa={:.2} sb={:.2} a\\b={:.2} b^a={:.2}",
-                p.normal,
-                p.origin,
-                sa.area(),
-                sb.area(),
-                cadcraft_geom::bool2d::difference(&sa, &sb).map(|r| r.area()).unwrap_or(-1.0),
-                cadcraft_geom::bool2d::intersect(&sb, &sa).map(|r| r.area()).unwrap_or(-1.0),
-            );
-        }
-        match boolean(&plate, &tool, Bool3::Difference) {
-            Ok(s) => println!("result volume {:.4}", s.volume()),
-            Err(e) => println!("error {e}"),
-        }
     }
 }
