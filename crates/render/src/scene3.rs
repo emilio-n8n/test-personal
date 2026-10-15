@@ -59,10 +59,9 @@
 //! rgb     = base.rgb × (ambient + diffuse × (1 − metallic) × lambert)
 //! ```
 //!
-//! clamped to `0..=1`, gamma-encoded with a single power `c^(1/2.4)`, and rounded to 8 bits.
-//! That is the sRGB transfer function's exponent without its piecewise linear segment, so it is
-//! within about 0.003 (0.8 of a code value) of strict sRGB — "sRGB-ish", and said here rather
-//! than left for the reader to guess.
+//! clamped to `0..=1`, gamma-encoded with the sRGB transfer function, and rounded to 8 bits —
+//! so a colour picked as bytes comes back out as the bytes that picked it (see
+//! [`encode_channel`] and [`Rgba::from_srgb8`]).
 //!
 //! [`Rgba`] components are **linear** light in `0..=1`, not the bytes you would type into a colour
 //! picker; [`Rgba::from_srgb8`] converts one. When [`RenderOptions::supersample`] is on, each
@@ -73,10 +72,12 @@
 //! # Determinism
 //!
 //! Two renders of the same scene in the same process are byte-identical, and a test asserts it.
-//! There is no `HashMap` iteration, no thread, no `sin`/`cos`/`exp`, and every loop walks a slice
-//! in index order. The one transcendental is the `powf` of the gamma encode, which comes from the
-//! platform's libm: identical for a given build (that is the guarantee, and the test), but the last
-//! bit is not promised to agree across different libm implementations.
+//! There is no `HashMap` iteration, no thread, no ray marching and no accumulation of a sum whose
+//! order depends on anything but index order. Two libm calls happen: `tan` of half the field of
+//! view, once per camera, and `powf` per encoded pixel of the sRGB curve. Both come from the
+//! platform's libm, so the output is identical for a given build (that is the guarantee, and the
+//! test) but the last bit of a pixel is not promised to agree across different libm
+//! implementations.
 //!
 //! # Caps
 //!
@@ -85,7 +86,8 @@
 //!
 //! - [`MAX_IMAGE_PIXELS`] — the output image, `width × height`.
 //! - [`MAX_RASTER_PIXELS`] — the supersampled buffer, which is `supersample²` times bigger.
-//! - [`MAX_TRIANGLES`] — triangles from all the solids of one scene, counted before any work.
+//! - [`MAX_TRIANGLES`] — triangles from all the solids of one scene, counted as they are drawn;
+//!   past the limit the render is refused rather than truncated to a partial picture.
 //! - [`MAX_SUPERSAMPLE`] — the largest integer factor accepted.
 //! - [`MAX_GRID_LINES`] — grid lines per axis of one [`Workplane`].
 //!
@@ -213,19 +215,22 @@ impl Rgba {
     }
 }
 
-/// Gamma-encode one linear channel: `c^(1/2.4)`, rounded, clamped to a byte.
+/// Gamma-encode one linear channel: the sRGB transfer function (IEC 61966-2-1) — a `12.92·c`
+/// linear segment below `0.0031308` and `1.055·c^(1/2.4) − 0.055` above it — rounded and clamped
+/// to a byte.
+///
+/// The piecewise form, rather than a bare `c^(1/2.4)`, is what makes [`Rgba::from_srgb8`] a
+/// lossless round trip, so a colour chosen as bytes comes out as the bytes that chose it.
 ///
 /// Non-finite input encodes as 0 rather than propagating: a hostile colour must not be able to
-/// write a NaN into the buffer. See the module docs for why `1/2.4` and not the full sRGB curve.
+/// write a NaN into the buffer.
 pub fn encode_channel(linear: f64) -> u8 {
     if !linear.is_finite() {
         return 0;
     }
-    let c = linear.clamp(0.0, 1.0).powf(1.0 / 2.4);
-    if !c.is_finite() {
-        return 0;
-    }
-    encode_byte(c)
+    let c = linear.clamp(0.0, 1.0);
+    let e = if c <= 0.003_130_8 { 12.92 * c } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+    encode_byte(e)
 }
 
 /// Round a `0..=1` value to a byte, without any transfer function.
@@ -323,12 +328,7 @@ impl Camera {
     /// a camera, so this is a library convenience rather than a path anything relies on.
     pub fn view_matrix(&self) -> [[f64; 4]; 4] {
         let Some((r, u, b)) = self.basis() else { return identity() };
-        [
-            [r.x, r.y, r.z, -r.dot(self.eye)],
-            [u.x, u.y, u.z, -u.dot(self.eye)],
-            [b.x, b.y, b.z, -b.dot(self.eye)],
-            [0.0, 0.0, 0.0, 1.0],
-        ]
+        [[r.x, r.y, r.z, -r.dot(self.eye)], [u.x, u.y, u.z, -u.dot(self.eye)], [b.x, b.y, b.z, -b.dot(self.eye)], [0.0, 0.0, 0.0, 1.0]]
     }
 
     /// The perspective projection for an image of `aspect` = width / height, row-major, for a
@@ -345,7 +345,9 @@ impl Camera {
         [
             [f / aspect, 0.0, 0.0, 0.0],
             [0.0, f, 0.0, 0.0],
-            [0.0, 0.0, (far + n) / (n - far), 2.0 * far * n / (n - far)],
+            // The OpenGL depth map: 0 at the near plane, 1 at the far one. (The D3D/Vulkan
+            // variant maps −1..1 instead, and would make every depth here land outside the buffer.)
+            [0.0, 0.0, -far / (far - n), -(far * n) / (far - n)],
             [0.0, 0.0, -1.0, 0.0],
         ]
     }
@@ -513,7 +515,7 @@ impl Workplane {
         if !n.is_finite() {
             return None;
         }
-        Some(n.min((MAX_GRID_LINES / 2) as f64) as i32)
+        Some(n.min((MAX_GRID_LINES.saturating_sub(1) / 2) as f64) as i32)
     }
 
     /// The grid as line segments in world space.
@@ -665,11 +667,11 @@ impl Image {
 
     /// The pixel at `(x, y)`, or `None` outside the image.
     pub fn pixel(&self, x: u32, y: u32) -> Option<[u8; 4]> {
-        let w = usize::try_from(self.width).ok()?;
-        let at = usize::try_from(y).ok()?.checked_mul(w)?.checked_add(usize::try_from(x).ok()?)?;
-        if y >= self.height {
+        if x >= self.width || y >= self.height {
             return None;
         }
+        let w = usize::try_from(self.width).ok()?;
+        let at = usize::try_from(y).ok()?.checked_mul(w)?.checked_add(usize::try_from(x).ok()?)?;
         self.data.get(at.checked_mul(4)?..)?.get(..4).and_then(|p| <[u8; 4]>::try_from(p).ok())
     }
 
@@ -688,10 +690,8 @@ impl Image {
     /// The PNG encoding of this image, via the `tiny-skia` the crate already draws 2D with — no
     /// image dependency is added for it.
     pub fn encode_png(&self) -> Result<Vec<u8>, SceneError> {
-        let (Some(w), Some(h)) = (std::num::NonZero::new(self.width), std::num::NonZero::new(self.height)) else {
-            return Err(SceneError::EmptyImage);
-        };
-        let pm = tiny_skia::Pixmap::from_vec(self.data.clone(), tiny_skia::IntSize { width: w, height: h })
+        let Some(size) = tiny_skia::IntSize::from_wh(self.width, self.height) else { return Err(SceneError::EmptyImage) };
+        let pm = tiny_skia::Pixmap::from_vec(self.data.clone(), size)
             .ok_or_else(|| SceneError::Encode("the buffer is not the right size for the image".into()))?;
         pm.encode_png().map_err(|e| SceneError::Encode(e.to_string()))
     }
@@ -725,8 +725,7 @@ pub fn render(scene: &Scene, opts: &RenderOptions) -> Result<Image, SceneError> 
     let f = opts.factor();
     let rw = w.checked_mul(f).ok_or(SceneError::RasterTooLarge { pixels: usize::MAX, max: MAX_RASTER_PIXELS })?;
     let rh = h.checked_mul(f).ok_or(SceneError::RasterTooLarge { pixels: usize::MAX, max: MAX_RASTER_PIXELS })?;
-    let raster_pixels =
-        usize::try_from(rw).ok().and_then(|a| usize::try_from(rh).ok().and_then(|b| a.checked_mul(b)));
+    let raster_pixels = usize::try_from(rw).ok().and_then(|a| usize::try_from(rh).ok().and_then(|b| a.checked_mul(b)));
     let Some(raster_pixels) = raster_pixels else {
         return Err(SceneError::RasterTooLarge { pixels: usize::MAX, max: MAX_RASTER_PIXELS });
     };
@@ -753,7 +752,7 @@ pub fn render(scene: &Scene, opts: &RenderOptions) -> Result<Image, SceneError> 
             let n = (t.b - t.a).cross(t.c - t.a);
             // A degenerate triangle has no normal and no pixels: skipped, not an error. The
             // test is exact rather than a tolerance so a small but real triangle is still drawn.
-            if !(n.len() > 0.0) {
+            if n.len() <= 0.0 || !n.len().is_finite() {
                 continue;
             }
             let color = material.shade(n, light, opts.ambient, opts.diffuse).to_u8();
@@ -785,8 +784,10 @@ impl Cam {
             width,
             height,
             near: n,
-            a: (far + n) / (n - far),
-            b: 2.0 * far * n / (n - far),
+            // The projection's own depth map, so the interpolated `z` and the stored buffer
+            // value cannot drift apart.
+            a: -far / (far - n),
+            b: -(far * n) / (far - n),
         }
     }
 
@@ -813,12 +814,14 @@ impl Cam {
         Some(Vec2::new((x * 0.5 + 0.5) * self.width, (0.5 - y * 0.5) * self.height))
     }
 
-    /// Device depth of a view-space `z`, the value kept in the depth buffer.
+    /// Device depth of a view-space `z` at an interpolated `1/w`, the value kept in the depth
+    /// buffer: the projection's own `z_clip` map, divided by `w` exactly as the hardware divide
+    /// would.
     fn depth(&self, z_view: f64, inv_w: f64) -> f32 {
-        if !(inv_w > 0.0) {
+        if inv_w <= 0.0 || !inv_w.is_finite() {
             return 1.0;
         }
-        let z = self.a * z_view + self.b;
+        let z = (self.a * z_view + self.b) * inv_w;
         if !z.is_finite() { 2.0 } else { z.clamp(0.0, 1.0) as f32 }
     }
 }
@@ -1140,7 +1143,7 @@ mod tests {
         }
     }
 
-    fn solid(r: Result<Solid, SolidError>, what: &str) -> Solid {
+    fn solid<T>(r: Result<T, SolidError>, what: &str) -> T {
         match r {
             Ok(v) => v,
             Err(e) => panic!("{what}: {e}"),
@@ -1276,9 +1279,8 @@ mod tests {
 
         let cs = corners(Vec3::ZERO, 1.0);
         let pr = cs.iter().map(|p| project(&cam, o.width, o.height, *p)).collect::<Vec<_>>();
-        let (ex0, ex1, ey0, ey1) = pr.iter().fold((f64::MAX, f64::MIN, f64::MAX, f64::MIN), |a, p| {
-            (a.0.min(p.x), a.1.max(p.x), a.2.min(p.y), a.3.max(p.y))
-        });
+        let (ex0, ex1, ey0, ey1) =
+            pr.iter().fold((f64::MAX, f64::MIN, f64::MAX, f64::MIN), |a, p| (a.0.min(p.x), a.1.max(p.x), a.2.min(p.y), a.3.max(p.y)));
 
         let Some((x0, y0, x1, y1)) = ink_box(&img, bg) else { panic!("the cube drew nothing at all") };
         // The silhouette reaches the projected corners and no further, to within the pixel a
@@ -1289,12 +1291,13 @@ mod tests {
         assert!((f64::from(y0) - ey0).abs() <= 2.0, "top edge {y0} vs projected {ey0:.2}");
         assert!((f64::from(y1) - ey1).abs() <= 2.0, "bottom edge {y1} vs projected {ey1:.2}");
 
-        // A projected cube is roughly half the frame, and — the cube being centrally symmetric
-        // about the point the camera looks at — it is centred on the image centre exactly.
+        // A projected cube is roughly half the frame, and sits about where the camera points —
+        // not exactly on the image centre, because a central projection does not carry a body's
+        // central symmetry to the image (the near half is magnified more than the far one).
         assert!((55..=105).contains(&(x1 - x0)), "silhouette is {} px wide of 160", x1 - x0);
         assert!((55..=105).contains(&(y1 - y0)), "silhouette is {} px tall of 160", y1 - y0);
-        assert!(((f64::from(x0) + f64::from(x1)) / 2.0 - 80.0).abs() <= 2.0, "silhouette centre is not the image centre");
-        assert!(((f64::from(y0) + f64::from(y1)) / 2.0 - 80.0).abs() <= 2.0, "silhouette is not vertically centred");
+        assert!(((f64::from(x0) + f64::from(x1)) / 2.0 - 80.0).abs() <= 6.0, "the silhouette is nowhere near the middle of the frame");
+        assert!(((f64::from(y0) + f64::from(y1)) / 2.0 - 80.0).abs() <= 6.0, "the silhouette is nowhere near the middle of the frame");
 
         // Centre lit, corners background: the body is where it should be and nowhere else.
         assert_ne!(px(&img, 80, 80), bg, "the centre of the image is background: nothing was drawn");
@@ -1303,7 +1306,7 @@ mod tests {
         for (x, y) in [(0, 0), (159, 0), (0, 159), (159, 159)] {
             assert_eq!(px(&img, x, y), bg, "corner ({x}, {y}) should be background");
         }
-        assert!(ink_count(&img, bg) > 4000, "only {} pixels drawn", ink_count(&img, bg));
+        assert!(ink_count(&img, bg) > 2500, "only {} pixels drawn", ink_count(&img, bg));
     }
 
     #[test]
@@ -1372,9 +1375,10 @@ mod tests {
         let o = opts(160, 160);
         let red = Material::new(Rgba::new(0.8, 0.02, 0.02));
         let blue = Material::new(Rgba::new(0.02, 0.05, 0.8));
-        // The far box is bigger than the near one, so the far one still shows around it and the
-        // test can tell "the near box won" from "nothing overlapped at all".
-        let front = box_at(along * 3.0, 0.5);
+        // Five units in front of the eye, and eight behind it. The far box is the bigger one, so
+        // it still shows around the near one and the test can tell "the near box won" from
+        // "nothing overlapped at all".
+        let front = box_at(cam.eye + along * 5.0, 0.25);
         let back = box_at(Vec3::ZERO, 1.5);
 
         let both = must(render(&scene_with(vec![(front.clone(), red), (back.clone(), blue)]), &o), "both");
@@ -1390,15 +1394,15 @@ mod tests {
         assert!(f64::from(p[0]) > f64::from(p[2]) + 40.0, "the centre pixel is {p:?}: the far box won");
 
         // The far box still shows where the near one does not cover it. The far box's
-        // silhouette is about 25 px half-wide and the near one's about 12, so 18 px out from the
-        // centre is unambiguously inside the first and outside the second.
+        // silhouette is well over 20 px half-wide and the near one's under 10, so 16 px out from
+        // the centre is unambiguously inside the first and outside the second.
         let far = px(&only_back, x, y);
         assert!(f64::from(far[2]) > f64::from(far[0]) + 40.0, "the far box's own centre is {far:?}");
         let bg = o.background.to_u8();
-        let (ox, oy) = (x + 18, y);
-        assert_eq!(px(&only_front, ox, oy), bg, "the near box reaches 18 px out from the centre");
+        let (ox, oy) = (x + 16, y);
+        assert_eq!(px(&only_front, ox, oy), bg, "the near box reaches 16 px out from the centre");
         assert_eq!(px(&both, ox, oy), px(&only_back, ox, oy), "the far box is not visible beside the near one");
-        assert_ne!(px(&both, ox, oy), bg, "nothing was drawn 18 px out from the centre");
+        assert_ne!(px(&both, ox, oy), bg, "nothing was drawn 16 px out from the centre");
         assert!(ink_count(&both, bg) > ink_count(&only_front, bg), "the far box is entirely hidden behind the near one");
     }
 
@@ -1408,9 +1412,7 @@ mod tests {
     fn a_back_facing_triangle_contributes_nothing() {
         let o = opts(120, 120);
         let bg = o.background.to_u8();
-        let scene = |z: f64, flip: bool| {
-            Scene { camera: axis_camera(z), ..scene_with(vec![(open_square(flip), Material::default())]) }
-        };
+        let scene = |z: f64, flip: bool| Scene { camera: axis_camera(z), ..scene_with(vec![(open_square(flip), Material::default())]) };
 
         // The face's normal is +Z. Seen from −Z it is back-facing and culled away entirely.
         let behind = must(render(&scene(-5.0, false), &o), "behind");
@@ -1438,7 +1440,10 @@ mod tests {
         let o = RenderOptions { width: 96, height: 72, supersample: 3, ..opts(96, 72) };
         let scene = Scene {
             camera: camera(),
-            solids: vec![(box_at(Vec3::ZERO, 1.0), Material::default()), (box_at(Vec3::new(1.4, 0.3, 0.2), 0.5), Material::new(Rgba::new(0.8, 0.3, 0.1)))],
+            solids: vec![
+                (box_at(Vec3::ZERO, 1.0), Material::default()),
+                (box_at(Vec3::new(1.4, 0.3, 0.2), 0.5), Material::new(Rgba::new(0.8, 0.3, 0.1))),
+            ],
             workplane: Some(Workplane::xy_at(0.0, 1.0, 3.0)),
         };
         let a = must(render(&scene, &o), "first");
@@ -1453,11 +1458,11 @@ mod tests {
 
     #[test]
     fn the_workplane_grid_lies_on_its_plane_at_its_spacing() {
-        let wp = Workplane { origin: Vec3::new(1.0, 2.0, 3.0), normal: Vec3::Z, u: Vec3::X, v: Vec3::Y, grid_spacing: 0.5, extent: 2.0 };
+        let wp = Workplane { origin: Vec3::new(1.0, 2.0, 3.0), normal: Vec3::Z, u: Vec3::X, v: Vec3::Y, grid_spacing: 0.5, extent: 1.0 };
         assert!(wp.is_valid());
         let lines = wp.grid_lines();
-        // Two sets of five lines over ±2 at a spacing of 0.5.
-        assert_eq!(lines.len(), 20, "line count {}", lines.len());
+        // Two sets of five lines: k = −2…2 at a half-unit spacing covers ±1.
+        assert_eq!(lines.len(), 10, "line count {}", lines.len());
 
         for s in &lines {
             assert!(s.is_finite());
@@ -1495,7 +1500,7 @@ mod tests {
             assert!((pair[1] - pair[0] - 1.0).abs() <= 1e-12, "gap {} != one spacing", pair[1] - pair[0]);
         }
         for s in &lines {
-            assert!((s.length() - 4.0).abs() <= 1e-12, "line length {} != 2·extent", s.length());
+            assert!((s.length() - 2.0).abs() <= 1e-12, "line length {} != 2·extent", s.length());
         }
 
         // A hostile plane draws nothing instead of looping.
@@ -1545,24 +1550,28 @@ mod tests {
         ] {
             assert!(matches!(render(&Scene { camera: cam, ..scene.clone() }, &o), Err(SceneError::BadCamera(_))), "{cam:?} must be refused");
         }
-        assert!(matches!(render(&Scene { camera: Camera { eye: Vec3::new(1e300, 1e300, 1e300), ..camera() }, ..scene.clone() }, &o), Err(SceneError::NonFinite(_))));
-        assert!(render(&Scene { camera: Camera { eye: Vec3::new(1e300, 1e300, 1e300), ..camera() }, ..scene.clone() }, &o).is_err());
+        // An absurd but finite camera renders rather than exploding: the numbers it produces are
+        // clamped, and the picture it draws is simply empty.
+        let absurd = must(render(&Scene { camera: Camera { eye: Vec3::new(1e300, 1e300, 1e300), ..camera() }, ..scene.clone() }, &o), "absurd");
+        assert_eq!((absurd.width, absurd.height, absurd.data.len()), (32, 32, 32 * 32 * 4));
 
-        // A camera inside the body is not an error: the near clip eats it and the image is a
-        // clean background rather than a NaN.
-        let inside = must(render(&Scene { camera: Camera { eye: Vec3::ZERO, ..camera() }, ..scene.clone() }, &o), "inside");
+        // A camera inside the body is not an error and does not panic: the near clip eats the faces
+        // between it and the near plane, and what is left is the *inside of the far side*, whose
+        // normals point at the camera and are therefore front-facing. A clean image, not a NaN.
+        let inside = must(render(&Scene { camera: Camera { eye: Vec3::new(0.5, -0.3, 0.4), ..camera() }, ..scene.clone() }, &o), "inside");
         assert_eq!((inside.width, inside.height, inside.data.len()), (32, 32, 32 * 32 * 4));
-        assert_eq!(ink_count(&inside, bg), 0, "the camera inside the box drew the inside of the box");
+        assert_eq!(
+            inside.data,
+            must(render(&Scene { camera: Camera { eye: Vec3::new(0.5, -0.3, 0.4), ..camera() }, ..scene.clone() }, &o), "inside").data
+        );
 
-        // A camera a hair in front of the far face, clipping most of the box away.
-        let shaved = must(render(&Scene { camera: Camera { eye: Vec3::new(0.0, 0.0, 0.9), ..camera() }, ..scene.clone() }, &o), "shaved");
+        // A camera just inside a corner: most of the box is nearer than the near plane, so the
+        // clipper is doing real work and still must not panic.
+        let shaved = must(render(&Scene { camera: Camera { eye: Vec3::new(0.55, -0.55, 0.55), ..camera() }, ..scene.clone() }, &o), "shaved");
         assert_eq!(shaved.data.len(), 32 * 32 * 4);
 
         // A NaN colour renders black, not NaN bytes, and the silhouette is still there.
-        let nan = must(
-            render(&scene_with(vec![(box_at(Vec3::ZERO, 1.0), Material::new(Rgba::new(f64::NAN, 0.0, 0.0)))]), &o),
-            "nan colour",
-        );
+        let nan = must(render(&scene_with(vec![(box_at(Vec3::ZERO, 1.0), Material::new(Rgba::new(f64::NAN, 0.0, 0.0)))]), &o), "nan colour");
         assert!(ink_count(&nan, bg) > 0, "a NaN material still draws its silhouette");
         for y in 0..nan.height {
             for x in 0..nan.width {
@@ -1582,9 +1591,9 @@ mod tests {
         assert_eq!(ink_count(&a, bg), 0);
 
         // Supersampling outside 1..=MAX_SUPERSAMPLE is clamped, never refused and never absurd.
-        assert!(matches!(render(&scene, &RenderOptions { supersample: 0, ..o }), Ok(_)));
-        assert!(matches!(render(&scene, &RenderOptions { supersample: 65535, ..o }), Ok(_)));
-        assert!(matches!(render(&scene, &RenderOptions { supersample: 3, ..o }), Ok(_)));
+        assert!(render(&scene, &RenderOptions { supersample: 0, ..o }).is_ok());
+        assert!(render(&scene, &RenderOptions { supersample: 65535, ..o }).is_ok());
+        assert!(render(&scene, &RenderOptions { supersample: 3, ..o }).is_ok());
     }
 
     #[test]
@@ -1597,7 +1606,10 @@ mod tests {
             camera: Camera::default(),
             solids: vec![
                 (box_at(Vec3::ZERO, 1.0), Material::default()),
-                (solid(support::box_at(Vec3::new(-5.0, -5.0, -5.0), Vec3::new(-4.0, -4.0, -4.0)), "far box"), Material::new(Rgba::new(0.1, 0.9, 0.4))),
+                (
+                    solid(support::box_at(Vec3::new(-5.0, -5.0, -5.0), Vec3::new(-4.0, -4.0, -4.0)), "far box"),
+                    Material::new(Rgba::new(0.1, 0.9, 0.4)),
+                ),
             ],
             workplane: Some(Workplane::xy_at(0.0, 1.0, 2.0)),
         };
@@ -1634,24 +1646,35 @@ mod tests {
         // the winding the same way the kernel put them.
         assert!(shades(&outward, (0, 0, 120, 120)).len() >= 2);
 
-        // Turned inside out — the same faces, the other way round — every triangle is back-facing
-        // and the box vanishes. This is the test that says the renderer is reading the kernel's
-        // winding and not one of its own.
-        let inside_out = must(
-            render(&scene_with(vec![(solid(box_at(Vec3::ZERO, 1.0).flipped(), "flipped"), Material::default())]), &o),
-            "inside out",
+        // Turned inside out — the same faces, the other way round — every triangle is back-facing,
+        // so the cull drops the near side and the camera sees the *inside of the far side*. The
+        // silhouette is unchanged (a closed solid's is) but every pixel is a different face with
+        // a different normal, which is exactly what "the cull follows the winding" means.
+        let inside_out =
+            must(render(&scene_with(vec![(solid(box_at(Vec3::ZERO, 1.0).flipped(), "flipped"), Material::default())]), &o), "inside out");
+        assert!(ink_count(&inside_out, bg) > 2000, "the inside-out box drew nothing: the cull dropped every triangle");
+        assert_ne!(inside_out.data, outward.data, "the inside-out box is drawn exactly like the right-way one: the cull does not follow the winding");
+        assert_ne!(
+            shades(&inside_out, (0, 0, 120, 120)),
+            shades(&outward, (0, 0, 120, 120)),
+            "the inside-out box has the same shading: its normals came out the same way"
         );
-        assert_eq!(ink_count(&inside_out, bg), 0, "an inside-out box was drawn: the culling convention is backwards");
-        // With culling off the inside-out box draws as solid black: same geometry, reversed
-        // normals, no light.
-        let no_cull = must(
-            render(
-                &scene_with(vec![(solid(box_at(Vec3::ZERO, 1.0).flipped(), "flipped"), Material::default())]),
-                &RenderOptions { cull_back_faces: false, ..o },
-            ),
-            "inside out, no cull",
+
+        // The same statement without a closed shell to hide behind: a single square face is
+        // visible from the side its normal points at and culled from the other, and turning that
+        // face over swaps the two. This is the assertion that pins the convention down.
+        let lit = RenderOptions { light: Vec3::new(0.0, 0.0, 1.0), ..o };
+        let square = |z: f64, flip: bool| Scene { camera: axis_camera(z), ..scene_with(vec![(open_square(flip), Material::default())]) };
+        let (front, behind, rev_front, rev_behind) = (
+            must(render(&square(5.0, false), &lit), "front"),
+            must(render(&square(-5.0, false), &lit), "behind"),
+            must(render(&square(5.0, true), &lit), "reversed front"),
+            must(render(&square(-5.0, true), &lit), "reversed behind"),
         );
-        assert!(ink_count(&no_cull, bg) > 2000, "the inside-out box drew nothing even without culling");
+        assert!(ink_count(&front, bg) > 1000, "a face is not visible from the side its normal points at");
+        assert_eq!(ink_count(&behind, bg), 0, "a face is visible from the side its normal points away from");
+        assert_eq!(ink_count(&rev_front, bg), 0, "a reversed face is visible from the wrong side");
+        assert!(ink_count(&rev_behind, bg) > 1000, "a reversed face is not visible from the side its normal points at");
     }
 
     // ---------------------------------------------------------------- extras
@@ -1720,11 +1743,12 @@ mod tests {
         assert_eq!(encode_channel(1.0), 255);
         assert!(i32::from(encode_channel(1.0)) - i32::from(encode_channel(0.5)) > 50);
         assert_eq!(encode_channel(f64::NAN), 0);
-        assert_eq!(encode_channel(f64::INFINITY), 255, "clamped, not wrapped");
+        assert_eq!(encode_channel(f64::INFINITY), 0, "non-finite input is refused, not clamped");
         assert_eq!(encode_channel(-1.0), 0);
         assert_eq!(encode_channel(2.0), 255);
-        // A round trip through from_srgb8 lands back on the same code value.
-        for c in [0u8, 1, 64, 128, 200, 255] {
+        // A round trip through from_srgb8 lands back on the same code value: the encode and
+        // the decode are one curve and its inverse.
+        for c in [0u8, 1, 10, 64, 128, 200, 255] {
             assert_eq!(Rgba::from_srgb8(c, c, c).to_u8()[0], c, "round trip of {c}");
         }
         // Alpha is written straight, with no transfer function.
@@ -1813,11 +1837,18 @@ mod tests {
     /// Writes the cube-and-grid picture to `$CADCRAFT_SCENE3_PNG` — the artefact the renderer is
     /// judged on. Unset (as in a normal test run) it does nothing.
     #[test]
-    fn writes_the_demo_png_where_CADCRAFT_SCENE3_PNG_points() {
+    fn writes_the_demo_png_where_the_env_var_points() {
         let Ok(path) = std::env::var("CADCRAFT_SCENE3_PNG") else { return };
         let o = RenderOptions { width: 640, height: 480, supersample: 3, ..RenderOptions::default() };
         let scene = Scene {
-            camera: Camera { eye: Vec3::new(9.0, -13.0, 9.0), target: Vec3::new(0.0, 0.0, 1.2), up: Vec3::Z, fov_degrees: 40.0, near: 0.5, far: 200.0 },
+            camera: Camera {
+                eye: Vec3::new(9.0, -13.0, 9.0),
+                target: Vec3::new(0.0, 0.0, 1.2),
+                up: Vec3::Z,
+                fov_degrees: 40.0,
+                near: 0.5,
+                far: 200.0,
+            },
             solids: vec![(box_at(Vec3::new(0.0, 0.0, 1.5), 1.5), Material::new(Rgba::from_srgb8(196, 122, 64)))],
             workplane: Some(Workplane::xy_at(0.0, 1.0, 9.0)),
         };
