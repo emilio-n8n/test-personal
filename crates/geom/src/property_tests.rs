@@ -435,3 +435,222 @@ fn large_coordinate_known_answers_stay_accurate() {
         }
     }
 }
+
+// ---------- 2D booleans ----------
+
+/// A random convex polygon: angles sorted on a circle at equal radius. Equal radii keep the loop
+/// convex, so it is simple and its shoelace area is the area the even-odd rule fills — which is
+/// what the area identities below compare against.
+fn convex_polygon(rng: &mut Rng, n: usize, r: f64) -> crate::Regions {
+    let mut angles: Vec<f64> = (0..n).map(|_| rng.f64(std::f64::consts::PI)).collect();
+    angles.sort_by(f64::total_cmp);
+    let pts: Vec<Vec2> = angles.iter().map(|a| Vec2::from_angle(*a) * r).collect();
+    crate::Region::new(pts).to_regions()
+}
+
+/// A random polygon that may well cross itself. Even-odd still defines it, but its shoelace is
+/// not its filled area, so it is only used for "does not panic" and output-shape checks.
+fn wobbly_polygon(rng: &mut Rng, n: usize, r: f64) -> crate::Regions {
+    let mut angles: Vec<f64> = (0..n).map(|_| rng.f64(std::f64::consts::PI)).collect();
+    angles.sort_by(f64::total_cmp);
+    let pts: Vec<Vec2> =
+        angles.iter().map(|a| Vec2::from_angle(*a) * (r * (0.4 + 0.6 * ((rng.next() >> 11) as f64 / (1u64 << 53) as f64)))).collect();
+    crate::Region::new(pts).to_regions()
+}
+
+/// Uniform in `[0, 1)`.
+fn unit(rng: &mut Rng) -> f64 {
+    (rng.next() >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// Run a region set through the same normalisation the engine applies to its output.
+fn canonical(rs: crate::Regions) -> crate::Regions {
+    let mut loops: Vec<Vec<Vec2>> = Vec::new();
+    loops.extend(rs.loops().cloned());
+    crate::Regions::from_loops(loops, 1e-9).unwrap_or_default()
+}
+
+fn axis_rect(x0: f64, y0: f64, x1: f64, y1: f64) -> crate::Regions {
+    crate::Region::new(vec![Vec2::new(x0, y0), Vec2::new(x1, y0), Vec2::new(x1, y1), Vec2::new(x0, y1)]).to_regions()
+}
+
+/// A loop is simple when no vertex repeats and no two non-adjacent edges cross.
+fn loop_is_simple(l: &[Vec2], tol: f64) -> bool {
+    let n = l.len();
+    if n < 3 {
+        return false;
+    }
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if let (Some(p), Some(q)) = (l.get(i), l.get(j))
+                && p.near(*q, tol)
+            {
+                return false;
+            }
+        }
+    }
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if j == i + 1 || (i == 0 && j == n - 1) {
+                continue;
+            }
+            let (Some(a), Some(b), Some(c), Some(d)) = (l.get(i), l.get((i + 1) % n), l.get(j), l.get((j + 1) % n)) else {
+                continue;
+            };
+            if crate::line_line(&crate::Line::new(*a, *b), &crate::Line::new(*c, *d)).is_some() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn regions_are_simple(rs: &crate::Regions, tol: f64) -> bool {
+    let mut all: Vec<&Vec<Vec2>> = rs.loops().collect();
+    if rs.iter().any(|r| r.holes.iter().any(|h| !loop_is_simple(h, tol) || !loop_is_simple(&r.outer, tol))) {
+        return false;
+    }
+    all.sort_by_key(|l| l.len());
+    // Every hole must sit strictly inside its own outer loop.
+    for r in rs.iter() {
+        for h in &r.holes {
+            let Some(v) = h.first() else { continue };
+            if !crate::point_in_polygon(&r.outer, *v) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The overlap of two axis-aligned rectangles, computed without the boolean engine.
+fn analytic_overlap(a: &[f64], b: &[f64]) -> f64 {
+    let w = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
+    let h = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
+    w * h
+}
+
+#[test]
+fn boolean_of_rectangles_matches_the_analytic_overlap() {
+    let mut rng = Rng::new(0x5EED_1234);
+    for case in 0..400 {
+        // Small ranges force heavy overlap, tangency and shared-edge cases.
+        let span = if case % 4 == 0 { 2.0 } else { 40.0 };
+        let rect = |rng: &mut Rng| {
+            let x = rng.f64(span);
+            let y = rng.f64(span);
+            let w = (unit(rng) * span / 2.0).max(1e-3);
+            let h = (unit(rng) * span / 2.0).max(1e-3);
+            [x, y, x + w, y + h]
+        };
+        let (ra, rb) = (rect(&mut rng), rect(&mut rng));
+        let (a, b) = (axis_rect(ra[0], ra[1], ra[2], ra[3]), axis_rect(rb[0], rb[1], rb[2], rb[3]));
+        let overlap = analytic_overlap(&ra, &rb);
+        let (Some(u), Some(i), Some(d), Some(x)) =
+            (crate::bool2d::union(&a, &b), crate::bool2d::intersect(&a, &b), crate::bool2d::difference(&a, &b), crate::bool2d::xor(&a, &b))
+        else {
+            panic!("case {case}: boolean returned None for {ra:?} and {rb:?}");
+        };
+        let (aa, ab) = (a.area(), b.area());
+        assert!(near(i.area(), overlap, 1e-9), "case {case}: intersect {} != {overlap}", i.area());
+        assert!(near(u.area(), aa + ab - overlap, 1e-9), "case {case}: union {}", u.area());
+        assert!(near(d.area(), aa - overlap, 1e-9), "case {case}: difference {}", d.area());
+        assert!(near(x.area(), aa + ab - 2.0 * overlap, 1e-9), "case {case}: xor {}", x.area());
+        let tol = 1e-9 * span.max(1.0);
+        assert!(regions_are_simple(&u, tol), "case {case}: union not simple");
+        assert!(regions_are_simple(&i, tol), "case {case}: intersect not simple");
+        assert!(regions_are_simple(&d, tol), "case {case}: difference not simple");
+    }
+}
+
+#[test]
+fn boolean_area_identities_hold_for_random_polygons() {
+    let mut rng = Rng::new(0xB001_5EED);
+    for case in 0..300 {
+        let a = convex_polygon(&mut rng, 5, 3.0);
+        let b = convex_polygon(&mut rng, 5, 3.0);
+        let (Some(u), Some(i), Some(d)) = (crate::bool2d::union(&a, &b), crate::bool2d::intersect(&a, &b), crate::bool2d::difference(&a, &b)) else {
+            panic!("case {case}: None");
+        };
+        let (aa, ab, au, ai, ad) = (a.area(), b.area(), u.area(), i.area(), d.area());
+        assert!(near(au + ai, aa + ab, 1e-9), "case {case}: {au} + {ai} != {aa} + {ab}");
+        assert!(near(ad + ai, aa, 1e-9), "case {case}: {ad} + {ai} != {aa}");
+        assert!(near(au, aa + ab - ai, 1e-9), "case {case}: union {au}");
+        let tol = 1e-8;
+        assert!(regions_are_simple(&u, tol) && regions_are_simple(&i, tol) && regions_are_simple(&d, tol), "case {case}: not simple");
+    }
+}
+
+#[test]
+fn boolean_is_idempotent_commutative_and_reflexive() {
+    let mut rng = Rng::new(0xC0FFEE);
+    for case in 0..200 {
+        // Normalized first: the engine returns canonical loops, so idempotence can only be
+        // compared against a canonical input.
+        let a = canonical(convex_polygon(&mut rng, 4, 2.5));
+        let b = canonical(convex_polygon(&mut rng, 4, 2.5));
+        let (Some(uab), Some(uba)) = (crate::bool2d::union(&a, &b), crate::bool2d::union(&b, &a)) else {
+            panic!("case {case}");
+        };
+        assert_eq!(uab, uba, "case {case}: union is not commutative");
+        assert_eq!(crate::bool2d::union(&a, &a).unwrap_or_default(), a, "case {case}: union is not idempotent");
+        assert_eq!(crate::bool2d::intersect(&a, &a).unwrap_or_default(), a, "case {case}: intersect is not idempotent");
+        assert!(crate::bool2d::difference(&a, &a).unwrap_or_default().is_empty(), "case {case}: a - a is not empty");
+        assert!(crate::bool2d::xor(&a, &a).unwrap_or_default().is_empty(), "case {case}: a xor a is not empty");
+        let Some(dba) = crate::bool2d::difference(&b, &a) else { panic!("case {case}") };
+        let dabs = crate::bool2d::difference(&a, &b).unwrap_or_default();
+        let x = crate::bool2d::xor(&a, &b).unwrap_or_default();
+        assert!(near(x.area(), dba.area() + dabs.area(), 1e-9), "case {case}: xor {} vs {}", x.area(), dba.area() + dabs.area());
+    }
+}
+
+#[test]
+fn boolean_of_a_contained_region_follows_set_rules() {
+    let mut rng = Rng::new(0x1DEA);
+    for case in 0..200 {
+        let outer = axis_rect(-2.0, -2.0, 2.0, 2.0);
+        let w = (unit(&mut rng) * 1.5).max(1e-3);
+        let h = (unit(&mut rng) * 1.5).max(1e-3);
+        let x = -2.0 + unit(&mut rng) * (4.0 - w);
+        let y = -2.0 + unit(&mut rng) * (4.0 - h);
+        let inner = axis_rect(x, y, x + w, y + h);
+        assert!(near(crate::bool2d::union(&outer, &inner).unwrap_or_default().area(), 16.0, 1e-9), "case {case}");
+        assert!(near(crate::bool2d::intersect(&outer, &inner).unwrap_or_default().area(), w * h, 1e-9), "case {case}");
+        assert!(crate::bool2d::difference(&outer, &inner).unwrap_or_default().area() > 16.0 - w * h - 1e-9, "case {case}");
+        assert!(crate::bool2d::difference(&inner, &outer).unwrap_or_default().is_empty(), "case {case}");
+    }
+}
+
+#[test]
+fn boolean_never_panics_on_hostile_geometry() {
+    let mut rng = Rng::new(0xBAD0_0BAD);
+    for _ in 0..400 {
+        let mk = |rng: &mut Rng| {
+            let n = 3 + (rng.next() % 6) as usize;
+            let pts: Vec<Vec2> = (0..n)
+                .map(|_| match rng.next() % 8 {
+                    0 => Vec2::new(f64::NAN, rng.f64(10.0)),
+                    1 => Vec2::new(rng.f64(10.0), f64::INFINITY),
+                    2 => Vec2::new(rng.hostile(), rng.hostile()),
+                    3 => Vec2::new(rng.f64(1e-300), rng.f64(1e-300)),
+                    4 => Vec2::new(rng.f64(1e18), rng.f64(1e18)),
+                    _ => rng.vec(10.0),
+                })
+                .collect();
+            crate::Region::new(pts).to_regions()
+        };
+        let (a, b) = if rng.next().is_multiple_of(2) {
+            (mk(&mut rng), mk(&mut rng))
+        } else {
+            (wobbly_polygon(&mut rng, 5, 3.0), wobbly_polygon(&mut rng, 7, 2.0))
+        };
+        let _ = crate::bool2d::union(&a, &b);
+        let _ = crate::bool2d::intersect(&a, &b);
+        let _ = crate::bool2d::difference(&a, &b);
+        let _ = crate::bool2d::xor(&a, &b);
+        let mut loops: Vec<Vec<Vec2>> = Vec::new();
+        loops.extend(a.loops().cloned());
+        loops.extend(b.loops().cloned());
+        let _ = crate::Regions::from_loops(loops, 1e-9);
+    }
+}
