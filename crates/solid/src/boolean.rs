@@ -19,7 +19,7 @@
 //! inside-out, rather than by tracking which operand each plane came from — that is where the
 //! sign of a cut is easy to get backwards.
 
-use cadcraft_geom::{Regions, bool2d};
+use cadcraft_geom::{Region, Regions, Vec2, bool2d};
 
 use crate::{Face, Plane, Solid, SolidError, limits::MAX_FACES, section::section};
 
@@ -103,7 +103,13 @@ pub fn boolean(a: &Solid, b: &Solid, op: Bool3) -> Result<Solid, SolidError> {
             // Both own it, same side: one merged face. Opposite sides: the plane runs through the
             // middle of the result and is not a boundary at all.
             (Bool3::Union, true, true, true) => bool2d::union(&sa, &sb),
-            (Bool3::Union, true, true, false) => Some(Regions::default()),
+            // Two solids on *opposite* sides of a shared plane: that plane is interior only where
+            // they overlap. Everywhere else it is still the boundary of one of them, so the face is
+            // exactly what one of them covers and the other does not. Dropping the plane outright
+            // (which is what this used to do) is right only when the two sections coincide, and
+            // leaves an open shell the moment a box is stacked on a *part* of another — the case
+            // `a_union_across_a_shared_plane_keeps_the_exposed_parts` pins down.
+            (Bool3::Union, true, true, false) => bool2d::difference(&sa, &sb),
             (Bool3::Intersect, true, true, true) => bool2d::intersect(&sa, &sb),
             (Bool3::Intersect, true, false, _) | (Bool3::Intersect, false, true, _) => bool2d::intersect(&sa, &sb),
             (Bool3::Intersect, true, true, false) | (Bool3::Intersect, false, false, _) => Some(Regions::default()),
@@ -126,7 +132,22 @@ pub fn boolean(a: &Solid, b: &Solid, op: Bool3) -> Result<Solid, SolidError> {
         if region.is_empty() {
             continue;
         }
-        faces.push(Face::new(*p, region)?);
+        faces.push(Face::new(*p, region.clone())?);
+        // Union across a plane the two operands sit on *opposite* sides of: the exposed part of
+        // each operand's face is a boundary of the union, but the two parts point in opposite
+        // directions — A's top face looks up, B's bottom face looks down. A planar face carries
+        // exactly one normal, so they cannot be one face, and merging them into one is what left
+        // an open shell along the join.
+        if matches!((op, a_owns, b_owns, same_side), (Bool3::Union, true, true, false))
+            && let Some(back) = bool2d::difference(&sb, &sa)
+            && !back.is_empty()
+        {
+            // `flipped` reverses `u`, so the region has to be handed over in the *flipped* plane's
+            // own frame. Reusing `p`'s coordinates would mirror the face back and put it on the
+            // wrong side of the solid.
+            let mirrored = remap_regions(&back, |q| Vec2::new(-q.x, q.y));
+            faces.push(Face::new(p.flipped(), mirrored)?);
+        }
     }
     let mut solid = Solid::from_faces(faces)?;
     // Faces that a tool only *touched* keep their whole loop, while the faces around the touch are
@@ -291,4 +312,19 @@ mod tests {
         // A is 10x10x10 and the corner 5x5x5 of it lies inside B.
         assert!((d.volume() - 875.0).abs() < 1e-6, "volume {}", d.volume());
     }
+}
+
+/// Every point of every loop, put through `f`.
+fn remap_regions(region: &Regions, f: fn(Vec2) -> Vec2) -> Regions {
+    Regions::new(
+        region
+            .regions()
+            .iter()
+            .map(|r| {
+                let outer = r.outer.iter().copied().map(f).collect();
+                let holes = r.holes.iter().map(|h| h.iter().copied().map(f).collect()).collect();
+                Region { outer, holes }
+            })
+            .collect(),
+    )
 }

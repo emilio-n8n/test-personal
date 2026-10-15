@@ -671,6 +671,13 @@ pub struct Session {
     lisp_last: Option<std::result::Result<lisp::value::Value, String>>,
     /// What the last HATCHPICK kept (the Hatch and Gradient dialog's picks).
     pub hatch_picks: Option<cmd::hatch::HatchPicks>,
+    /// The 3D parametric model the `solid.*` commands drive: its parameters, its feature tree and
+    /// what the last rebuild made of them.
+    ///
+    /// It is not part of the 2D drawing and shares none of its machinery — its history is the
+    /// model's own, its files are `.ccm` and `.stl`, and a failed edit keeps the last solid that
+    /// worked rather than undoing anything.
+    pub solid_model: cadcraft_model::Model,
 }
 
 impl Default for Session {
@@ -719,6 +726,7 @@ impl Session {
             lisp: lisp::LispState::default(),
             lisp_last: None,
             hatch_picks: None,
+            solid_model: cadcraft_model::Model::new(),
         }
     }
     pub fn new_drawing(&mut self, metric: bool) -> usize {

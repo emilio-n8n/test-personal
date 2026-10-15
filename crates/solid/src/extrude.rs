@@ -150,7 +150,11 @@ fn triangle_face(a: &Vec3, b: &Vec3, c: &Vec3) -> Option<Face> {
         return None;
     }
     let plane = Plane::new(*a, n).ok()?;
-    let region = Region::new(vec![plane.to_local(*b), plane.to_local(*c)]).to_regions();
+    // All three vertices. Dropping `a` left a two-point loop, `Region::is_empty` calls a loop
+    // shorter than three empty, and the patch was silently dropped — so a revolve produced no
+    // swept faces at all, only its two end caps. Caught by `revolve_builds_a_solid` in
+    // `tests/property.rs`.
+    let region = Region::new(vec![plane.to_local(*a), plane.to_local(*b), plane.to_local(*c)]).to_regions();
     Face::new(plane, region).ok()
 }
 

@@ -4,6 +4,10 @@
 //! triangles and points, each tagged with its top-level entity handle and resolved colour.
 //! Linetypes, hatches, text, block references and dimensions are expanded here. The UI uploads
 //! the list to the GPU; [`raster`] draws it on the CPU (PNG export, plot preview, tests).
+//!
+//! [`scene3`] is the 3D side: a [`scene3::Scene`] of solid-kernel bodies seen through a
+//! [`scene3::Camera`], drawn to an RGBA8 image by a small CPU rasteriser. It is a validation
+//! renderer for checking geometry, not an interactive viewport — its own docs say what it is not.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
@@ -20,6 +24,7 @@ pub mod pen;
 mod plotstyle;
 mod point;
 pub mod raster;
+pub mod scene3;
 mod text;
 mod tolerance;
 pub mod units;
@@ -34,6 +39,7 @@ pub use dim::{ArrowGeom, Arrowhead, DimGeometry, DimText, LineRole, arrowhead, d
 pub use fill::triangulate_evenodd;
 pub use hatch::{fill_loops as hatch_fill_loops, pattern_swatch};
 pub use paper::{PAPER_SIZES, PaperSize, Sheet, paper_size, sheet};
+pub use scene3::{Camera, Image, Material, Rgba, Scene, SceneError, Workplane, render as render_scene};
 pub use tolerance::{gdt_points, tolerance_in};
 
 /// Handle carried by model-space geometry drawn inside a paper-space viewport (it belongs to no

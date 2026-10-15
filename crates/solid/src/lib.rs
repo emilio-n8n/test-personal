@@ -45,6 +45,10 @@
 //! - A blend that runs off the end of its edge *across* a face it was not asked to cut is refused
 //!   with a reason. Touching such a face is fine — the end cap of a blend usually lies exactly in
 //!   it — but crossing it needs three faces welded at one corner, which the boolean does not do.
+//! - `step_faceted_brep` writes the solid as AP214 text with corners and edges shared across faces,
+//!   and it checks the shape of what it wrote rather than what a reader makes of it: no third-party
+//!   STEP parser has ever opened a file this writer produced, so validate an export in the CAD
+//!   system it is meant for before trusting it.
 //!
 //! # What is verified
 //!
@@ -53,6 +57,14 @@
 //! numbers: a chamfer of 2 on a 10-cube removes exactly 20, a fillet's removed cross-section is
 //! within a whisker of `4 − π`, a binary STL is 84 + 50n bytes of f32, and a mesh's volume agrees
 //! with the exact volume to 1e-9.
+//!
+//! `tests/property.rs` adds randomized coverage over the whole public API: the volume identities
+//! `a \ b` against `a n b` and `a u b` for boxes, prisms and disjoint pairs; agreement between the
+//! three volume computations; operand-order symmetry of the union; idempotence and reflexivity; that
+//! every generated result validates, pinches cleanly and encloses volume; that face count and volume
+//! survive a 1e-6-to-1e6 rescale; that a chamfer or fillet never returns a broken body; and that
+//! non-finite, subnormal and 1e300 input never panics on any entry point. It pins four defects that
+//! are still open, and names the test that finds each.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
@@ -66,6 +78,7 @@ mod mesh;
 mod plane;
 mod section;
 mod solid;
+mod step;
 
 // The geometry types that appear in this crate's own API are re-exported so a caller needs one
 // dependency, not two.
@@ -79,6 +92,7 @@ pub use mesh::{Mesh, Triangle, mesh_from_solid, stl_ascii, stl_binary};
 pub use plane::Plane;
 pub use section::Section;
 pub use solid::{Edge, Face, Solid, reverse_regions};
+pub use step::{step_faceted_brep, step_schema};
 
 /// Caps that keep every operation bounded on hostile input.
 pub mod limits {
