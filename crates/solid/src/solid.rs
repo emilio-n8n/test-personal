@@ -159,6 +159,86 @@ impl Face {
     }
 }
 
+/// A lattice of canonical corners, and the search that keeps two nearby corners in the same one.
+///
+/// # Why the cells are twice the tolerance
+///
+/// Bucketing corners on a `tol`-sized grid and calling each cell a corner is not a weld, it is a
+/// lottery: the rounding boundary between two cells sits half a cell inside each of them, so two
+/// corners of the same solid that arrived by different routes and came to rest a ten-millionth of a
+/// unit apart fall either side of it as often as not. Each then gets a cell to itself, each is
+/// written twice, and the pass hands back the very mismatch it was called to remove — a shell that
+/// read as having an edge used once.
+///
+/// Cells `2 * tol` wide close that hole without changing anything else. Two corners within `tol`
+/// differ by at most half a cell in each axis, so their cell indices differ by at most one and the
+/// twenty-six neighbours around a corner are always enough to find the corner it belongs to. What
+/// the cells *are* stops mattering; only the search does.
+///
+/// The search returns the **lowest-numbered** corner within `tol`, never the first one a walk
+/// happens to reach. That matters because the pass runs twice: once to register the corners, once to
+/// rewrite the loops against them. Both walks must reach the same verdict, or a corner is snapped to
+/// one number on the way in and left on the other on the way out.
+///
+/// Registration is in the shell's own vertex order, so the answer does not depend on hash iteration,
+/// and a shell with nothing to weld comes back untouched rather than moved by up to half a cell.
+#[derive(Debug)]
+struct WeldGrid {
+    tol: f64,
+    cell: f64,
+    origin: Vec3,
+    buckets: std::collections::BTreeMap<(i64, i64, i64), Vec<usize>>,
+    corners: Vec<Vec3>,
+}
+
+impl WeldGrid {
+    fn new(tol: f64, origin: Vec3) -> Self {
+        WeldGrid { tol, cell: 2.0 * tol, origin, buckets: std::collections::BTreeMap::new(), corners: Vec::new() }
+    }
+
+    /// The cell a corner falls in. The indices are bounded by the shell's own size over `tol`, which
+    /// a cell twice that wide keeps small; the cast saturates rather than wrapping, so even a
+    /// degenerate tolerance gives a cell rather than a wrapped one.
+    fn cell_of(&self, v: Vec3) -> (i64, i64, i64) {
+        (
+            ((v.x - self.origin.x) / self.cell).floor() as i64,
+            ((v.y - self.origin.y) / self.cell).floor() as i64,
+            ((v.z - self.origin.z) / self.cell).floor() as i64,
+        )
+    }
+
+    /// The canonical corner for `v`, if one is already within `tol` of it.
+    fn find(&self, v: Vec3) -> Option<Vec3> {
+        let (cx, cy, cz) = self.cell_of(v);
+        let mut best: Option<usize> = None;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let Some(list) = self.buckets.get(&(cx + dx, cy + dy, cz + dz)) else { continue };
+                    for &i in list {
+                        let Some(p) = self.corners.get(i) else { continue };
+                        if p.dist(v) <= self.tol && best.is_none_or(|b| i < b) {
+                            best = Some(i);
+                        }
+                    }
+                }
+            }
+        }
+        best.and_then(|i| self.corners.get(i).copied())
+    }
+
+    /// The canonical corner for `v`, registering `v` itself if nothing is within `tol` of it.
+    fn canonical(&mut self, v: Vec3) -> Vec3 {
+        if let Some(hit) = self.find(v) {
+            return hit;
+        }
+        let key = self.cell_of(v);
+        self.corners.push(v);
+        self.buckets.entry(key).or_default().push(self.corners.len() - 1);
+        v
+    }
+}
+
 /// Snap every vertex onto a shared grid and split every face edge at any vertex that lands on it.
 ///
 /// Two faces share a boundary when their edges coincide. When one face has been split at a vertex
@@ -168,8 +248,8 @@ impl Face {
 /// Snapping comes first, and is not optional. The same corner arrives at two faces by different
 /// routes and lands a ten-millionth of a unit apart; split one face at that corner and not the
 /// other and the weld has *created* the mismatch it was meant to remove. So every vertex is first
-/// moved onto a `tol`-sized grid and replaced by the canonical point for its cell, which is the
-/// same number in every face that has it.
+/// moved onto the number [`WeldGrid`] holds for it, which is the same number in every face that has
+/// it.
 ///
 /// The inserted vertices are collinear, so no region changes shape and no area or volume moves; the
 /// point is that the *edges* then match their neighbours, which is what the shell is made of.
@@ -181,31 +261,36 @@ pub fn weld_edges(faces: &mut [Face], tol: f64) -> usize {
     if total > crate::limits::MAX_WELD_VERTICES {
         return 0;
     }
-    // Phase 1: one canonical position per grid cell.
-    let origin = faces.iter().flat_map(|f| f.vertices()).fold(Vec3::ZERO, |acc, v| acc.min(v));
-    let cell = |v: Vec3| -> (i64, i64, i64) {
-        let s = if tol > 0.0 { 1.0 / tol } else { 1e12 };
-        (((v.x - origin.x) * s).round() as i64, ((v.y - origin.y) * s).round() as i64, ((v.z - origin.z) * s).round() as i64)
-    };
-    let mut canonical: std::collections::BTreeMap<(i64, i64, i64), Vec3> = std::collections::BTreeMap::new();
-    for f in faces.iter() {
-        for v in f.vertices() {
-            canonical.entry(cell(v)).or_insert(v);
-        }
+    // A hostile tolerance is not a reason to skip the weld; it is a reason to use the floor the rest
+    // of the kernel uses.
+    let tol = if tol.is_finite() && tol > 0.0 { tol } else { 1e-12 };
+    // Non-finite corners cannot be welded to anything, and rounding one into a cell would make the
+    // loop arithmetic below produce NaN where it had an infinity. They are left exactly as they
+    // were; validation, not this pass, decides what an unusable solid is.
+    let all: Vec<Vec3> = faces.iter().flat_map(|f| f.vertices()).filter(|v| v.is_finite()).collect();
+    let Some(first) = all.first().copied() else { return 0 };
+    // The shell's own corner, not `Vec3::ZERO` clamped: every cell index is then small and
+    // non-negative whatever the drawing's coordinates are.
+    let origin = all.iter().fold(first, |acc, v| acc.min(*v));
+    let mut grid = WeldGrid::new(tol, origin);
+    for v in &all {
+        grid.canonical(*v);
     }
-    let vertices: Vec<Vec3> = canonical.values().copied().collect();
     for f in faces.iter_mut() {
         let plane = f.plane;
         for region in f.region.regions_mut() {
             for loop_pts in std::iter::once(&mut region.outer).chain(region.holes.iter_mut()) {
                 for p in loop_pts.iter_mut() {
                     let w = plane.to_world(p.x, p.y);
-                    let hit = canonical.get(&cell(w)).copied().unwrap_or(w);
-                    *p = plane.to_local(hit);
+                    if !w.is_finite() {
+                        continue;
+                    }
+                    *p = plane.to_local(grid.canonical(w));
                 }
             }
         }
     }
+    let vertices: &[Vec3] = &grid.corners;
     // Phase 2: split edges at the vertices that lie on them.
     let mut added = 0;
     for f in faces.iter_mut() {
@@ -229,7 +314,7 @@ pub fn weld_edges(faces: &mut [Face], tol: f64) -> usize {
                     }
                     // Vertices strictly between `a` and `b`, and on the segment to within `tol`.
                     let mut inner: Vec<(f64, Vec2)> = Vec::new();
-                    for v in &vertices {
+                    for v in vertices {
                         // Only a vertex *in this face's plane* may split one of its edges. Testing
                         // the projection alone is not enough, and it is quietly wrong for every
                         // axis-aligned part: a vertex off the plane projects exactly onto the
@@ -253,11 +338,19 @@ pub fn weld_edges(faces: &mut [Face], tol: f64) -> usize {
                     }
                     inner.sort_by(|x, y| x.0.total_cmp(&y.0));
                     let mut last = 0.0;
+                    let mut last_p: Option<Vec2> = None;
                     for (t, p) in inner {
                         if t - last <= f64::EPSILON {
                             continue;
                         }
+                        // Two corners a hair apart project onto two points a hair apart along the
+                        // edge, and inserting both leaves a sliver edge of no length: the boundary is
+                        // "used" by a segment that is really the same segment twice.
+                        if last_p.is_some_and(|q| q.dist(p) <= tol) {
+                            continue;
+                        }
                         last = t;
+                        last_p = Some(p);
                         out.push(p);
                         splits += 1;
                     }
@@ -424,6 +517,88 @@ mod weld_tests {
         assert!((after.volume() - before_volume).abs() < 1e-9, "volume moved: {before_volume} -> {}", after.volume());
         let after_loops: Vec<Vec<Vec2>> = after.faces.iter().flat_map(|f| f.region.loops().cloned()).collect();
         assert_eq!(before, after_loops, "a box has nothing to weld, and comes back the same loops");
+    }
+
+    /// Two faces that share one corner, and give it two numbers a millionth of a tolerance apart.
+    ///
+    /// On a tolerance-sized grid the rounding boundary sits half a cell inside each cell, so those
+    /// two numbers land either side of it: each face keeps its own, the corner is written twice, and
+    /// the weld hands back the mismatch it was called to remove. This is the boundary case, and it is
+    /// the one a cell-keyed lookup cannot see.
+    #[test]
+    fn welding_joins_two_corners_that_straddle_a_cell_boundary() {
+        let tol = 1e-9;
+        // `0.5e-9` rounds onto the next cell of a tolerance-sized grid and `0.5e-9 - 1e-15` does not.
+        // They are a millionth of a tolerance apart, which is nothing at all.
+        let hi = 0.5e-9;
+        let lo = 0.5e-9 - 1e-15;
+        let upright = match Plane::new(Vec3::ZERO, Vec3::Y) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let Some(a) = square_on(Plane::xy(0.0), [Vec3::new(lo, 0.0, 0.0), Vec3::new(4.0, 0.0, 0.0), Vec3::new(4.0, 2.0, 0.0), Vec3::new(lo, 2., 0.0)]) else {
+            return;
+        };
+        let Some(b) =
+            square_on(upright, [Vec3::new(hi, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 2.0), Vec3::new(hi, 0.0, 2.0)])
+        else {
+            return;
+        };
+        let mut faces = vec![a, b];
+        let added = weld_edges(&mut faces, tol);
+        // One number for one corner, in both faces: the first one registered, which is the lower of
+        // the two.
+        let shared = Vec3::new(lo, 0.0, 0.0);
+        assert!(faces[0].vertices().iter().any(|v| v.near(shared, 1e-18)), "the flat face kept its own corner: {:?}", faces[0].vertices());
+        assert!(faces[1].vertices().iter().any(|v| v.near(shared, 1e-18)), "and the upright face kept the other: {:?}", faces[1].vertices());
+        assert!(!faces[1].vertices().iter().any(|v| v.near(Vec3::new(hi, 0.0, 0.0), 1e-18)), "the second number is still in the shell");
+        // And the weld still does its other half: the upright face's base edge lies along the flat
+        // face's, so the flat face has to be cut at (2, 0, 0) or the two edges no longer match.
+        assert!(added >= 1, "nothing was split: {added}");
+        assert!(faces[0].vertices().iter().any(|v| v.near(Vec3::new(2.0, 0.0, 0.0), 1e-18)), "the flat face was not cut at (2, 0, 0): {:?}", faces[0].vertices());
+    }
+
+    #[test]
+    fn welding_twice_changes_nothing_more() {
+        // The pass runs its search twice over the same corners — once to register them, once to
+        // rewrite the loops against them — and both passes have to reach the same verdict, or a
+        // corner is snapped on the way in and left alone on the way out.
+        let upright = match Plane::new(Vec3::ZERO, Vec3::Y) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let Some(a) = square_on(Plane::xy(0.0), [Vec3::ZERO, Vec3::new(4.0, 0.0, 0.0), Vec3::new(4.0, 2.0, 0.0), Vec3::new(0.0, 2.0, 0.0)]) else {
+            return;
+        };
+        let Some(b) = square_on(upright, [Vec3::new(0.5e-9, 0.0, 0.0), Vec3::new(3.0, 0.0, 0.0), Vec3::new(3.0, 0.0, 2.0), Vec3::new(0.5e-9, 0.0, 2.0)]) else {
+            return;
+        };
+        let mut faces = vec![a, b];
+        weld_edges(&mut faces, 1e-9);
+        let after_first: Vec<Vec<Vec2>> = faces.iter().flat_map(|f| f.region.loops().cloned()).collect();
+        assert_eq!(weld_edges(&mut faces, 1e-9), 0, "a welded shell has nothing left to split");
+        let after_second: Vec<Vec<Vec2>> = faces.iter().flat_map(|f| f.region.loops().cloned()).collect();
+        assert_eq!(after_first, after_second, "the second pass moved a corner");
+    }
+
+    #[test]
+    fn welding_leaves_corners_further_apart_than_the_tolerance_alone() {
+        // The search is bounded by the tolerance, not by the cell. Two corners four tolerances apart
+        // are two corners, however close their cells, and a weld that merged them would silently
+        // move one face's boundary onto another's.
+        let tol = 1e-9;
+        let Some(a) = square_on(Plane::xy(0.0), [Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0), Vec3::new(2.0, 2.0, 0.0), Vec3::new(0.0, 2.0, 0.0)]) else {
+            return;
+        };
+        let gap = 2.0 + 4.0 * tol;
+        let Some(b) = square_on(Plane::xy(0.0), [Vec3::new(gap, 0.0, 0.0), Vec3::new(4.0, 0.0, 0.0), Vec3::new(4.0, 2.0, 0.0), Vec3::new(gap, 2.0, 0.0)]) else {
+            return;
+        };
+        let mut faces = vec![a, b];
+        let before: Vec<Vec<Vec2>> = faces.iter().flat_map(|f| f.region.loops().cloned()).collect();
+        assert_eq!(weld_edges(&mut faces, tol), 0, "nothing lies on anything else's edge");
+        let after: Vec<Vec<Vec2>> = faces.iter().flat_map(|f| f.region.loops().cloned()).collect();
+        assert_eq!(before, after, "corners four tolerances apart were merged");
     }
 }
 

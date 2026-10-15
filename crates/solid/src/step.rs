@@ -7,28 +7,154 @@
 //! reason to write a NURBS surface and a pile of trim curves. [`FACETED_BREP`] is the honest
 //! representation of what this kernel holds — a shell of planar faces over poly loops.
 //!
-//! # What is *not* guaranteed
+//! # How far this writer has been checked
 //!
-//! **This writer has never been validated against a third-party STEP parser.** None was available
-//! where it was written, and "a file no parser has ever opened" is a claim, not a guarantee. So
-//! the tests here check the *structure* of the output — the section layout, and above all that the
-//! entity graph has no dangling and no unreachable id — rather than that another program accepts
-//! the file. Before trusting an export, open it in the CAD system it is meant for and check three
-//! things: that it finds exactly one solid, that the solid's volume is the one you expect, and
-//! that the faces point outward.
+//! **No third-party STEP reader has ever opened a file this writer produced.** No OCCT, FreeCAD,
+//! SolidWorks, CAD Exchanger or `stepcode` was available where it was written, and a file no
+//! independent parser has accepted is a claim, not a guarantee. Nothing in this repository can
+//! change that, so it is stated at the top of this file, in the crate's own docs, and here in full:
 //!
-//! Two places where a strict schema validator could still object, both deliberate:
+//! - The tests in this module read the output back with a parser written beside the writer. They
+//!   catch a graph that does not hang together — a dangling `#n`, an entity nothing refers to, a
+//!   reversed loop, a dropped face.
+//! - `tests/step_interop.rs` reads the same files with a **second**, independently written parser
+//!   and checks the entity graph against a table of the expected attribute list of every keyword
+//!   this file can emit, the closure and orientation of the shell read back from the written
+//!   coordinates, and the volume recomputed from those coordinates. It exists so that a bug in
+//!   the first parser cannot hide, and it agrees with the same geometry the mesh writer produces.
+//! - Both parsers were written by the same author, from the same reading of the same specification.
+//!   Neither is a conforming STEP implementation: they do not check EXPRESS semantics, they do not
+//!   know about subtypes, inherited attributes or WHERE rules, and they do not build a topology.
+//!   **A file can pass every test here and still be rejected by a real reader.** What is missing is
+//!   one round trip through one independent implementation, and `DAT-003` in the master plan exists
+//!   to get it.
 //!
-//! - `ADVANCED_FACE` is used where AP214's `faceted_brep` rule names `FACE_SURFACE`. `ADVANCED_FACE`
-//!   is a `FACE_SURFACE` subtype that additionally requires every loop vertex to lie on the
-//!   surface and every edge to carry a curve; both hold here, since every face is planar and every
-//!   edge is a `LINE` in that same plane. Swapping the one keyword back to `FACE_SURFACE` is a
-//!   one-line change if a reader insists.
-//! - A face's outer loop is the first loop of its first region. A face holding *several disjoint*
-//!   regions writes its extra outer loops as `FACE_BOUND`, which is the only way a single STEP face
-//!   can carry more than one loop, and it means a reader that treats every `FACE_BOUND` as a hole
-//!   will read a disjoint face as one region with a hole punched through it. The kernel produces
-//!   such faces only after a boolean splits a face, and it is called out rather than hidden.
+//! The list below is therefore not a summary of the tests. It is the list of things this file does
+//! that a careful reader has to be told, because nothing about them is obvious from the schema and
+//! several of them are places a strict validator can object.
+//!
+//! # Every departure, shortcut and approximation, in one place
+//!
+//! ## A. Deliberate departures from AP214's `faceted_brep` rule
+//!
+//! 1. **`ADVANCED_FACE`, where the rule names `FACE_SURFACE`.** `ADVANCED_FACE` is a `FACE_SURFACE`
+//!    subtype that adds two obligations: every loop vertex must lie on the surface, and every edge
+//!    must carry a curve. Both hold here — every face is planar and every edge is a `LINE` in that
+//!    same plane — and `tests/step_interop.rs` checks both against the coordinates actually written.
+//!    Still, a validator that matches the rule text literally will object. Swapping the keyword
+//!    back to `FACE_SURFACE` is a one-line change, and `FACE_SURFACE` is in the interop test's
+//!    schema table so the file stays checkable either way.
+//! 2. **A second outer loop becomes a `FACE_BOUND`.** A face holding *several disjoint* regions
+//!    writes its extra outer loops as `FACE_BOUND`, because a STEP face's bound list has no way to
+//!    say "a second outer loop". A reader that assumes every `FACE_BOUND` is a hole reads such a
+//!    face as one region with a hole punched through it, and imports the wrong shape.
+//! 3. **`POLY_LOOP` instead of `EDGE_LOOP`, so there are no `ORIENTED_EDGE`s anywhere.** A
+//!    `POLY_LOOP` lists `VERTEX_POINT`s and nothing else, so the file carries no per-use edge
+//!    orientation flag: each face's sense along a shared edge is implied only by the order of the
+//!    vertices in that face's `POLY_LOOP`. That is correct and is what every faceted B-rep does,
+//!    but a reader that looks for oriented edges to build its topology map will find none, and a
+//!    reader that assumes the two faces of an edge traverse it the *same* way will be wrong here.
+//!
+//! ## B. Entities a reader has to tolerate
+//!
+//! 4. **The `EDGE_CURVE`s are referenced by nothing at all.** A `POLY_LOOP` names vertices, never
+//!    edges, so an edge curve written for a faceted shell is an orphan, and strict readers reject
+//!    orphans. The writer therefore hangs them off a second shape representation —
+//!    `GEOMETRIC_CURVE_SET` of `COMPOSITE_CURVE`s of `COMPOSITE_CURVE_SEGMENT`s — attached to the
+//!    same `PRODUCT_DEFINITION_SHAPE` as the solid. That is an edge-based *wireframe*
+//!    representation, not a real B-rep: the composite curves carry the edges and nothing else, and
+//!    no reader can rebuild the shell from them.
+//! 5. **The product has two shape representations.** `ADVANCED_BREP_SHAPE_REPRESENTATION` (the
+//!    solid) and `GEOMETRICALLY_BOUNDED_WIREFRAME_SHAPE_REPRESENTATION` (the edges), both named by
+//!    a `SHAPE_DEFINITION_REPRESENTATION` from the same `PRODUCT_DEFINITION_SHAPE`. That is legal —
+//!    a shape may have several representations — but a reader that expects exactly one, or that
+//!    picks the first and warns about the second, is behaving reasonably.
+//! 6. **Exactly two entities in the file are named by nothing**, and they are those two
+//!    representations: a part 21 file is a forest, not a single tree, and the shape representations
+//!    are where a reader starts.
+//!
+//! ## C. What the file does not contain
+//!
+//! 7. **No `APPLICATION_PROTOCOL_DEFINITION`, no `MECHANICAL_CONTEXT`, no
+//!    `PRODUCT_RELATED_PRODUCT_CATEGORY`.** The product structure is the AP203-shaped minimum
+//!    (`PRODUCT_CONTEXT` + `PRODUCT_DEFINITION_CONTEXT`). An AP214 reader that classifies a part by
+//!    walking to `MECHANICAL_CONTEXT('...',#app,'mechanical')` will not find the branch it expects
+//!    and may report the file as "not an AP214 part" or import it as a generic shape with no
+//!    product metadata.
+//! 8. **No colours, styles or units of presentation.** The shape is unstyled. A reader that shows
+//!    what it finds will use its own defaults; a reader that insists on a
+//!    `PRESENTATION_STYLE_ASSIGNMENT` has nothing to find.
+//! 9. **No assembly structure, no `SHAPE_REPRESENTATION_RELATIONSHIP`, no product shape
+//!    identity.** One solid, one product. Correct for this writer's job, and a reader looking for
+//!    a component tree will find none.
+//! 10. **The units are millimetres and nothing says so in words.** The `LENGTH_UNIT` is
+//!    `SI_UNIT(.MILLI.,.METRE.)` with an **empty name**, as are the angle and solid-angle units. A
+//!    reader has to read the prefix to know the file is in millimetres; a tool that trusts the
+//!    unit *name* sees a blank. The conversion is not performed anywhere — coordinates go out in
+//!    kernel units, and the kernel works in millimetres.
+//! 11. **No `DATE_AND_TIME`/`TIME_STAMP`, and empty author, organisation and authorisation fields
+//!    in `FILE_NAME`.** Deliberate: a clock would make two exports of one solid differ, and an
+//!    export that reproduces byte for byte is worth more than a timestamp nobody reads. A reader
+//!    that requires a timestamp to display provenance gets an empty string.
+//!
+//! ## D. Numeric and lexical choices that are legal but unusual
+//!
+//! 12. **Reals are written in Rust's shortest round-trip form, which is never exponential.** `1.0`
+//!     becomes `1.0` and `48.0` becomes `48.0`, but a coordinate of `1e-300` becomes three hundred
+//!     zeroes and a `0`. Part 21 accepts both (`1.E-300` is legal and is what mainstream writers
+//!     emit), so this is a legibility defect rather than an invalid file — but a part-21 reader
+//!     that parses reals with a fixed-size buffer has a real chance of tripping over a 300-digit
+//!     literal. The cure is one line in `real`: format with an exponent when the magnitude leaves
+//!     a sane band.
+//! 13. **Names are sanitised, not escaped.** `clean_name` keeps ASCII alphanumerics, space and
+//!     `_-.:`, caps the result at 120 characters and substitutes `cadcraft` for anything empty. A
+//!     name in a non-Latin script or carrying an accent is therefore silently truncated — part 21
+//!     has an `\X2\...\X0\` escape for exactly this and it is not used. A name carrying a quote
+//!     would end the literal and corrupt every statement after it, so dropping it is deliberate;
+//!     the cost is that the product name in the file is not always the product name asked for.
+//! 14. **`DIRECTION`s are interned on a `1e-9` grid.** A cube has twelve edges and three
+//!     directions, so sharing the few directions is most of the file's size. Two directions closer
+//!     than `1e-9` share one `DIRECTION` and the stored vector is whichever was written first — a
+//!     reader measuring directions below `1e-9` sees a difference the writer considers noise.
+//! 15. **The file's declared uncertainty is the kernel's working tolerance**, not a round number
+//!     (`diagonal × 1e-9`, clamped). That is the honest value — it is the distance the shell was
+//!     welded at — but it means the uncertainty changes with the size of the part, and a reader
+//!     that assumes a conventional `1e-7` will see something else.
+//!
+//! ## E. Ten minutes with a real CAD system: what to ask it
+//!
+//! This is the checklist. In order, because the first failures make the rest unreadable.
+//!
+//! - [ ] Does the reader accept the file at all (no schema error, no "unknown entity")?
+//! - [ ] Does it find **exactly one** solid, and one `CLOSED_SHELL` under it?
+//! - [ ] Does the solid's **volume** equal the kernel's, to a relative `1e-9`?
+//! - [ ] Do the faces point **outward** — is the solid selectable and is its volume positive?
+//! - [ ] Is the second shape representation (the edge wireframe) ignored, warned about, or fatal?
+//! - [ ] Does the reader accept **`ADVANCED_FACE`** where `faceted_brep` names `FACE_SURFACE`?
+//! - [ ] Does it need `APPLICATION_PROTOCOL_DEFINITION` / `MECHANICAL_CONTEXT`?
+//! - [ ] Does it report the unit as **millimetre**, given an empty `LENGTH_UNIT` name?
+//! - [ ] For a face with a hole (a washer): are the **`FACE_BOUND`s read as holes**?
+//! - [ ] For a face split into two disjoint regions: is the second region read, or punched through?
+//! - [ ] Does the reader reject two `VERTEX_POINT`s a hair apart as coincident? (`Topology::build`
+//!       welds on a tolerance grid, and a corner a whisker either side of a cell boundary can be
+//!       written twice; `weld_edges` is the cure, and it is the caller's job.)
+//! - [ ] Does anything object to a `POLY_LOOP` whose points are not strictly distinct, or to a
+//!       self-intersecting loop? **Neither is checked by the writer**: it trusts the kernel's
+//!       loops, and [`Solid::validate`] proves closure and orientation, not simplicity.
+//!
+//! # The parts that are *not* on that list, because they are checked here
+//!
+//! Every other property of the output is asserted by this module's tests and by
+//! `tests/step_interop.rs`: the section layout, sequential ids from `#1`, no dangling or forward
+//! reference, exactly two entry points, the entity table of every keyword, the `CLOSED_SHELL` face
+//! count against the solid's own, each face's loop count and vertex count, every boundary edge used
+//! once in each direction, every loop vertex on its own face's plane within the declared
+//! uncertainty, every `LINE` passing through both of its vertices, every edge curve referenced by
+//! exactly one composite segment, the winding of every bound against its own face normal, and the
+//! volume recomputed from the written coordinates. Orientation is preserved rather than re-derived:
+//! the loops go into the file as the kernel wound them and each face's `PLANE` axis is its own
+//! normal, so a shell that is open or inside-out is written faithfully and uselessly — run
+//! [`Solid::validate`] first.
 //!
 //! [`FACETED_BREP`]: https://www.step.org/
 
