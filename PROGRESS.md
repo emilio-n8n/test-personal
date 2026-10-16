@@ -388,3 +388,33 @@ That is the cell-straddle weakness `KER-BOOL-004` names, and this sweep is its m
 reproducer: `side = 100, d = 0.25` (and `side = 50, d = 0.25`, `side = 200, d = 1`). The fix belongs
 in the weld: snap to a coarser lattice and de-duplicate by proximity, or search neighbouring cells,
 rather than trusting one rounded cell index.
+
+### Task index complete — 10 of 10 files, 952 tasks
+
+`docs/plan/`: KER, SKT, MOD, ASM, SIM, CAM, DAT, REN/UI, UI, DRW, PLT — **19 150 lines**,
+**952 tasks**, of which **632 are `READY`**.
+
+| Index | Lines | Index | Lines |
+|---|---:|---|---:|
+| KER | 1362 | SIM | 1857 |
+| SKT | 1009 | CAM | 1876 |
+| MOD | 1781 | DAT | 1803 |
+| ASM | 656 | UI | 1870 |
+| DRW | 4091 | PLT | 2845 |
+
+Two contradictions between indexes were found by the writing agents and deliberately left for the
+coordinator rather than resolved silently:
+
+1. **`PLT-LAYER-009` is a blocked *decision*, not a task.** `ASM.md` puts `cadcraft-asm` at L3 and
+   allows it to use `cadcraft-model`, also L3 — which `check()` at `xtask/src/layers.rs:180`
+   flags as a violation. Two sibling documents disagree. Three ways out are listed; none chosen.
+2. **`cadcraft-drawing`'s layer (L2) is a judgement**, not something any document states, and
+   `cadcraft-drawing` may not use `render` (L2 sideways) — so the viewport's hidden-line style has
+   to be served from the engine layer.
+
+Also recorded rather than smoothed over: **hidden-line removal on a B-rep is surface-surface
+intersection** (`DRW-XRF-018`), which makes it the single hardest dependency in the whole plan and
+puts it squarely behind the NURBS work in `KER-SRF`.
+
+None of this is code. None of it is validated. It is a work breakdown with 952 entries, each with
+state, dependencies, owned files, a contract, refusals, tests, acceptance and risk.
