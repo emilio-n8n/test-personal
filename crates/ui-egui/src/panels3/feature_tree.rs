@@ -189,34 +189,45 @@ pub fn show(ui: &mut egui::Ui, rows: &[FeatureRow], tree: &mut FeatureTree) -> O
 /// One feature: the row itself, then its message underneath when it has one.
 fn row_ui(ui: &mut egui::Ui, row: &FeatureRow, tree: &mut FeatureTree, t: &Tokens) -> Option<FeatureAction> {
     let selected = tree.selected.as_deref() == Some(row.name.as_str());
-    let mut action = None;
-    let response = ui
+    let (response, controls) = ui
         .push_id(("row", &row.name), |ui| {
-            let inner = ui.horizontal(|ui| {
-                ui.add_space(f32::from(row.depth) * INDENT);
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(GLYPH, GLYPH), Sense::hover());
-                paint_state(ui.painter(), rect, row);
-                ui.add_space(GLYPH_GAP);
-                if row.suppressed {
-                    let (mark, _) = ui.allocate_exact_size(egui::vec2(GLYPH, GLYPH), Sense::hover());
-                    paint_hidden(ui.painter(), mark, t.text_dim);
+            ui.horizontal(|ui| {
+                // The feature itself: indent, state mark, the optional eye/turn markers, the
+                // name and the kind. This is the part a click selects, and its rectangle ends
+                // where the controls begin.
+                let identity = ui.horizontal(|ui| {
+                    ui.add_space(f32::from(row.depth) * INDENT);
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(GLYPH, GLYPH), Sense::hover());
+                    paint_state(ui.painter(), rect, row);
                     ui.add_space(GLYPH_GAP);
-                }
-                if row.rolled_back {
-                    let (mark, _) = ui.allocate_exact_size(egui::vec2(GLYPH, GLYPH), Sense::hover());
-                    paint_rolled_back(ui.painter(), mark, t.text_dim);
-                    ui.add_space(GLYPH_GAP);
-                }
-                let name = if row.suppressed {
-                    RichText::new(&row.name).color(t.text_faint)
-                } else if selected {
-                    RichText::new(&row.name).strong()
-                } else {
-                    RichText::new(&row.name)
-                };
-                ui.label(name);
-                ui.label(RichText::new(&row.kind).color(t.text_faint).small());
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if row.suppressed {
+                        let (mark, _) = ui.allocate_exact_size(egui::vec2(GLYPH, GLYPH), Sense::hover());
+                        paint_hidden(ui.painter(), mark, t.text_dim);
+                        ui.add_space(GLYPH_GAP);
+                    }
+                    if row.rolled_back {
+                        let (mark, _) = ui.allocate_exact_size(egui::vec2(GLYPH, GLYPH), Sense::hover());
+                        paint_rolled_back(ui.painter(), mark, t.text_dim);
+                        ui.add_space(GLYPH_GAP);
+                    }
+                    let name = if row.suppressed {
+                        RichText::new(&row.name).color(t.text_faint)
+                    } else if selected {
+                        RichText::new(&row.name).strong()
+                    } else {
+                        RichText::new(&row.name)
+                    };
+                    ui.label(name);
+                    ui.label(RichText::new(&row.kind).color(t.text_faint).small());
+                });
+                // A laid-out `Ui` senses hover only, so the row has to be made clickable here or
+                // a click on the name selects nothing. It is made clickable **before** the
+                // controls are added, because egui gives a contested click to the last widget
+                // registered at the point (see `hit_test::find_closest_within`): a click-sense
+                // rectangle laid over the whole row would swallow the buttons' clicks, while one
+                // that ends with the feature leaves every click on a button to that button.
+                let row_clicked = identity.response.interact(Sense::click());
+                let controls = ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if selected {
                         if ui
                             .add(egui::Button::new(crate::tl!("Suppressed")).selected(row.suppressed).small())
@@ -233,15 +244,13 @@ fn row_ui(ui: &mut egui::Ui, row: &FeatureRow, tree: &mut FeatureTree, t: &Token
                         ui.label(RichText::new(crate::i18n::t(row.state.label())).color(state_color(row, t)).small());
                     }
                     None
-                })
-                .inner
-            });
-            // A `Ui` comes back sensing hover only, so the row has to be made clickable here or a
-            // click on the name selects nothing. `interact` keeps the row's own plane, so the
-            // buttons above still take their own clicks.
-            inner.response.interact(Sense::click())
+                });
+                (row_clicked, controls.inner)
+            })
+            .inner
         })
-        .response;
+        .inner;
+    let mut action = controls;
     if response.clicked() {
         tree.selected = Some(row.name.clone());
         action = Some(FeatureAction::Select { name: row.name.clone() });

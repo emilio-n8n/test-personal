@@ -230,8 +230,10 @@ fn pixel_scale(rect: egui::Rect, frame: &Frame) -> Option<(f64, f64)> {
 
 /// The pointer shape that says what a drag will do.
 fn cursor_of(response: &egui::Response, panning: bool) -> egui::CursorIcon {
+    // egui has no separate closed-hand icon: `Grabbing` is the closed hand, whether the drag
+    // orbits or pans. The hover icons below are what says which one it will do.
     if response.dragged() {
-        return if panning { egui::CursorIcon::Grabbing } else { egui::CursorIcon::ClosedHand };
+        return egui::CursorIcon::Grabbing;
     }
     if response.hovered() {
         return if panning { egui::CursorIcon::Move } else { egui::CursorIcon::Grab };

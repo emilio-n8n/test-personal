@@ -96,3 +96,22 @@ Only these, and nothing that can be delegated:
 5. **Refuse a delivery** when the verifier says it is unsupported and the fixer says it is done twice.
 
 Everything else — writing, fixing, testing, reviewing — goes to an agent.
+
+---
+
+## 6. Model policy
+
+**The default model for every agent is `opencode-go/muse-spark-1.3-contributor`** ($0.10 in / $0.20
+out per million tokens — the cheapest non-free model available, chosen by the owner).
+
+The free models (`cat-jam-free`, `longcat-2.5-preview-free`) are **rate-limited**, and the limit is
+what caps the whole programme at roughly seven concurrent agents. Measured on 2026-10-16:
+`longcat-2.5-preview-free` died on `Endpoint is unavailable` in **three of five** launches, always
+without writing a single file, so its failures are silent and cost a whole context each time.
+
+`muse-spark-1.3-contributor` has variants `minimal | low | medium | high | xhigh`. Use `low` or
+`medium` for mechanical work with a well-specified contract, `high`/`xhigh` for geometry reasoning
+(NURBS, topology, boolean robustness) where a wrong answer is expensive.
+
+**Never switch a task to a different model without recording it here**, and never spend the owner's
+credits on a model they did not choose. A model substitution is a cost decision and belongs to them.

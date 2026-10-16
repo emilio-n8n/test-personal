@@ -11,21 +11,26 @@
 //! # Reuse
 //!
 //! This module reuses the following from `cadcraft-constraints`:
-//! - `expr::{Env, ExprError, parse, eval_with, valid_name}` for parameter expression evaluation
-//! - `format_value` for formatting parameter values
-//! - `SolveOptions` for the weighting policy
+//! - `lm::{solve_least_squares, Options, Report}` — the constraint crate's damped, weighted
+//!   minimum-norm Gauss–Newton solver, which is public: this module supplies the residual
+//!   equations and the initial guess, and carries no solver code of its own
+//! - `SolveOptions` for the calling convention (its `keep`/`prefer_move` handles refer to
+//!   drawing handles, which a sketch's points are not yet, so its fields are not read here)
 //! - `MAX_CONSTRAINTS` for the constraint limit
+//! - `expr::ExprError` for expression errors in parameter references
 //!
-//! The residual forms and LM solver in `cadcraft-constraints` are `pub(crate)` and cannot
-//! be called from this crate. The solver here is a compact port of the same algorithm.
+//! The numerical Jacobian and rank helpers of `cadcraft-constraints::lm` are `pub(crate)`.
+//! The copies here (`jacobian`, `rank`) exist only for the redundancy and DOF probes, which
+//! need them over this module's own parameter layout; the solve itself is the shared solver.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use cadcraft_geom::Vec2;
 use serde::{Deserialize, Serialize};
 
-use cadcraft_constraints::expr::{Env, ExprError, eval_with, parse, valid_name};
-use cadcraft_constraints::{MAX_CONSTRAINTS, SolveOptions, format_value};
+use cadcraft_constraints::expr::ExprError;
+use cadcraft_constraints::lm::{Options, Report, solve_least_squares};
+use cadcraft_constraints::{MAX_CONSTRAINTS, SolveOptions};
 
 /// A point in the sketch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -58,6 +63,12 @@ pub enum SketchConstraint {
     /// Two lines are perpendicular.
     Perpendicular { a: PointId, b: PointId, c: PointId, d: PointId, name: String },
     /// A line is tangent to a circle.
+    ///
+    /// The constraint locks the circle's radius: tangency relates the line to the circle's
+    /// current size, so the correction for tangency moves the line and the centre, never the
+    /// radius. The one exception is a circle that a [`SketchConstraint::Radius`] constraint
+    /// drives — then the radius is free again, and the tangency follows the driven radius
+    /// instead of fighting it.
     Tangent { line_a: PointId, line_b: PointId, circle: PointId, name: String },
     /// Two lines have equal length, or two circles have equal radius.
     Equal { a: PointId, b: PointId, c: PointId, d: PointId, name: String },
@@ -126,15 +137,14 @@ fn scale_tol(x: &[f64]) -> f64 {
     1e-9 * x.iter().fold(1.0f64, |m, v| m.max(v.abs()))
 }
 
-/// Maximum absolute value of a vector.
-fn max_abs(v: &[f64]) -> f64 {
-    v.iter().fold(0.0f64, |m, a| if a.is_finite() { m.max(a.abs()) } else { f64::INFINITY })
-}
-
-/// Squared L2 norm.
-fn norm2(v: &[f64]) -> f64 {
-    v.iter().map(|a| a * a).sum::<f64>()
-}
+/// Weight of the sketch's anchor in the solve: the first [`SketchEntity::Point`] is the
+/// corner everything else was drawn against, so a constraint change must not drag it away —
+/// with unit weights the minimum-norm step would split a dimension's correction evenly
+/// between both of its ends and slide the anchor along with them. At this weight the anchor
+/// moves by at most about the correction divided by [`ANCHOR_WEIGHT`] (≈ nanometres for
+/// drawing-scale corrections), which every geometric tolerance here is far above. A weight is
+/// not a lock: the anchor still counts in the degrees of freedom, it just does not drift.
+const ANCHOR_WEIGHT: f64 = 1e9;
 
 /// Numerical Jacobian over the free parameters (row-major, rows × free.len()).
 fn jacobian(f: &dyn Fn(&[f64], &mut Vec<f64>), x: &[f64], free: &[usize], rows: usize) -> Vec<f64> {
@@ -166,54 +176,6 @@ fn jacobian(f: &dyn Fn(&[f64], &mut Vec<f64>), x: &[f64], free: &[usize], rows: 
         }
     }
     jac
-}
-
-/// Solve the dense system `a y = b` (n × n, row-major) by Gaussian elimination with partial
-/// pivoting. `None` when singular.
-fn solve_dense(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> Option<Vec<f64>> {
-    let scale = a.iter().fold(0.0f64, |m, v| m.max(v.abs())).max(1e-300);
-    for col in 0..n {
-        let mut piv = col;
-        let mut best = 0.0;
-        for r in col..n {
-            let v = a.get(r * n + col)?.abs();
-            if v > best {
-                best = v;
-                piv = r;
-            }
-        }
-        if best <= scale * 1e-15 {
-            return None;
-        }
-        if piv != col {
-            for c in 0..n {
-                a.swap(piv * n + c, col * n + c);
-            }
-            b.swap(piv, col);
-        }
-        let p = *a.get(col * n + col)?;
-        for r in col + 1..n {
-            let f = *a.get(r * n + col)? / p;
-            if f == 0.0 {
-                continue;
-            }
-            for c in col..n {
-                let v = *a.get(col * n + c)?;
-                *a.get_mut(r * n + c)? -= f * v;
-            }
-            let bv = *b.get(col)?;
-            *b.get_mut(r)? -= f * bv;
-        }
-    }
-    let mut y = vec![0.0; n];
-    for r in (0..n).rev() {
-        let mut s = *b.get(r)?;
-        for c in r + 1..n {
-            s -= a.get(r * n + c)?.mul_add(*y.get(c)?, 0.0);
-        }
-        *y.get_mut(r)? = s / *a.get(r * n + r)?;
-    }
-    y.iter().all(|v| v.is_finite()).then_some(y)
 }
 
 /// Numerical rank of a row-major `rows × cols` matrix via Gaussian elimination.
@@ -265,101 +227,6 @@ fn rank(m: &[f64], rows: usize, cols: usize) -> usize {
         row += 1;
     }
     rank
-}
-
-/// Damped, weighted minimum-norm Gauss–Newton (Levenberg–Marquardt style) solver.
-///
-/// Each step solves `min ‖W^{1/2} Δx‖` subject to `J Δx = −r` (damped):
-/// `Δx = −W⁻¹ Jᵀ (J W⁻¹ Jᵀ + μ I)⁻¹ r`. Under-constrained systems therefore move as little as
-/// possible, and heavily weighted parameters move least.
-fn lm_solve(
-    f: &dyn Fn(&[f64], &mut Vec<f64>),
-    x0: &[f64],
-    free: &[usize],
-    weights: &[f64],
-    tol: f64,
-    max_iter: usize,
-) -> (Vec<f64>, bool, usize, f64) {
-    let mut x = x0.to_vec();
-    let mut r = Vec::new();
-    f(&x, &mut r);
-    let rows = r.len();
-    if rows == 0 || max_abs(&r) <= tol {
-        return (x, true, 0, max_abs(&r));
-    }
-    if free.is_empty() {
-        return (x, false, 0, max_abs(&r));
-    }
-    let nf = free.len();
-    let winv: Vec<f64> = free.iter().map(|&j| 1.0 / weights.get(j).copied().unwrap_or(1.0).max(1e-12)).collect();
-    let mut mu = 1e-10;
-    let mut cost = norm2(&r);
-    let mut iter = 0;
-    let mut rn = Vec::with_capacity(rows);
-    while iter < max_iter {
-        iter += 1;
-        let jac = jacobian(f, &x, free, rows);
-        // A = J W⁻¹ Jᵀ
-        let mut a = vec![0.0; rows * rows];
-        for i in 0..rows {
-            for k in i..rows {
-                let mut s = 0.0;
-                for (c, w) in winv.iter().enumerate() {
-                    s += jac.get(i * nf + c).copied().unwrap_or(0.0) * jac.get(k * nf + c).copied().unwrap_or(0.0) * w;
-                }
-                if let Some(v) = a.get_mut(i * rows + k) {
-                    *v = s;
-                }
-                if let Some(v) = a.get_mut(k * rows + i) {
-                    *v = s;
-                }
-            }
-        }
-        let diag_max = (0..rows).map(|i| a.get(i * rows + i).copied().unwrap_or(0.0)).fold(0.0f64, f64::max).max(1e-12);
-        let mut improved = false;
-        for _ in 0..12 {
-            let mut ad = a.clone();
-            for i in 0..rows {
-                if let Some(v) = ad.get_mut(i * rows + i) {
-                    *v += mu * diag_max;
-                }
-            }
-            let Some(y) = solve_dense(ad, r.clone(), rows) else {
-                mu *= 10.0;
-                continue;
-            };
-            let mut xn = x.clone();
-            for (c, &j) in free.iter().enumerate() {
-                let mut s = 0.0;
-                for (i, yi) in y.iter().enumerate() {
-                    s += jac.get(i * nf + c).copied().unwrap_or(0.0) * yi;
-                }
-                if let Some(v) = xn.get_mut(j) {
-                    *v -= winv.get(c).copied().unwrap_or(1.0) * s;
-                }
-            }
-            rn.clear();
-            f(&xn, &mut rn);
-            let cn = norm2(&rn);
-            if cn.is_finite() && cn < cost {
-                x = xn;
-                std::mem::swap(&mut r, &mut rn);
-                cost = cn;
-                mu = (mu * 0.1).max(1e-15);
-                improved = true;
-                break;
-            }
-            mu *= 10.0;
-        }
-        if max_abs(&r) <= tol {
-            return (x, true, iter, max_abs(&r));
-        }
-        if !improved {
-            break;
-        }
-    }
-    let converged = max_abs(&r) <= tol;
-    (x, converged, iter, max_abs(&r))
 }
 
 /// The layout of the parameter vector: which entity owns which parameters.
@@ -474,6 +341,18 @@ fn circle_at(x: &[f64], layout: &ParamLayout, entities: &[SketchEntity], id: Poi
                 return Some((c, r));
             }
             _ => {}
+        }
+    }
+    None
+}
+
+/// The parameter index of a circle's radius, or `None` when no circle with that centre exists.
+fn circle_radius_index(layout: &ParamLayout, entities: &[SketchEntity], id: PointId) -> Option<usize> {
+    for (i, e) in entities.iter().enumerate() {
+        if let SketchEntity::Circle { centre, .. } = e
+            && *centre == id
+        {
+            return layout.offsets.get(i).map(|(off, _)| *off);
         }
     }
     None
@@ -631,6 +510,11 @@ impl Sketch {
     ///
     /// Returns a report with the convergence status, remaining degrees of freedom, and the
     /// names of any redundant or conflicting constraints. On error, the sketch is unchanged.
+    ///
+    /// The solve itself is `cadcraft-constraints`' shared solver (`lm::solve_least_squares`):
+    /// a damped, weighted minimum-norm Gauss–Newton that moves the geometry as little as
+    /// possible. A system with more than 800 residual rows (`lm::MAX_ROWS`) is reported
+    /// non-converged rather than attempted.
     pub fn solve(&mut self, _opts: &SolveOptions) -> Result<SolveReport, SketchError> {
         // Check constraint count
         if self.constraints.len() > MAX_CONSTRAINTS {
