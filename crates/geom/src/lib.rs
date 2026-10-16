@@ -13,7 +13,7 @@ mod curve;
 mod fillet;
 mod intersect;
 mod mat;
-mod nurbs;
+pub mod nurbs;
 pub mod region;
 mod spline;
 mod spline_fit;
