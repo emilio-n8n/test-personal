@@ -1,49 +1,113 @@
 name: agent-check
 
-# The compiler service. An agent writes files and pushes its own branch; this
-# workflow compiles and tests it, so a broken change is reported in minutes
-# without spending one second of the orchestrator's time or this VM's CPU.
+# The compiler service for parallel development agents.
 #
-# Runs on a public repository the orchestrator owns, so the runners are
-# GitHub's -- not the two cores of the local machine. A matrix means N crates
-# are checked in parallel.
+# An agent writes files and pushes its own branch; this workflow compiles and
+# tests them on GitHub's runners, so a broken change is reported in minutes
+# without spending one second of the orchestrator's time or the VM's CPU.
+#
+# The matrix means N crates are checked in parallel without each waiting on the
+# others. A failing job is reported per crate, which is what makes a large
+# number of concurrent agents usable: their work is judged, not just written.
 
 on:
   push:
   pull_request:
   workflow_dispatch:
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  # The kernel and its dependents, split so each crate gets its own runner.
-  # Add a crate here the moment it has tests of its own.
-  core:
-    strategy:
-      fail-fast: false
-      matrix:
-        crate: [cadcraft-geom, cadcraft-solid, cadcraft-model, cadcraft-render]
+  # ---------------------------------------------------------------------------
+  # Static gates, whole workspace, in parallel. These are cheap and they are
+  # what most agent breakage actually is: a renamed type, a stale import, a
+  # test that never compiled.
+  # ---------------------------------------------------------------------------
+  fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - run: cargo fmt -p ${{ matrix.crate }} -- --check
-      - run: cargo clippy -p ${{ matrix.crate }} --all-targets -- -D warnings
-      - run: cargo test -p ${{ matrix.crate }}
+      - run: cargo fmt --all -- --check
 
-  # The 2D application. Heavier, so it gets its own runner and is not gated
-  # by the 3D work.
-  app:
+  clippy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test -p cadcraft-constraints -p cadcraft-doc -p cadcraft-io -p cadcraft-mcp
+        with:
+          components: clippy
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
-  # The whole workspace, as a single judgement.
-  workspace:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo check --workspace --all-targets
+
+  # ---------------------------------------------------------------------------
+  # Every crate with tests of its own, one runner each. Add a crate here the
+  # moment it acquires a test file.
+  # ---------------------------------------------------------------------------
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - cadcraft-geom
+          - cadcraft-solid
+          - cadcraft-model
+          - cadcraft-render
+          - cadcraft-constraints
+          - cadcraft-doc
+          - cadcraft-io
+          - cadcraft-mcp
+          - cadcraft-dxf
+          - cadcraft-dwg
+          - cadcraft-fonts
+          - cadcraft-color
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p ${{ matrix.crate }}
+
+  # ---------------------------------------------------------------------------
+  # The application shell. Heavy, and it must stay green regardless of the 3D
+  # work, so it gets its own runner and is not gated by the kernel.
+  # ---------------------------------------------------------------------------
+  app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p cadcraft-ui-egui
+
+  # ---------------------------------------------------------------------------
+  # The gates that are not cargo tests: the layering rules, the asset
+  # attribution audit, and the web build. All three are part of `cargo xtask
+  # ci` and all three can break on a change nobody expected.
+  # ---------------------------------------------------------------------------
+  gates:
+    strategy:
+      fail-fast: false
+      matrix:
+        gate: [layers, assets]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo run -p xtask -- ${{ matrix.gate }}
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: cargo run -p xtask -- wasm
