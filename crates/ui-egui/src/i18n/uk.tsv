@@ -1334,3 +1334,19 @@
 	Set Parameter	Задати параметр
 	List Parameters	Перелік параметрів
 	Model Info	Відомості про модель
+	No solid to show	Немає тіла для показу
+	Standard view	Стандартний вид
+	Fit	Вписати
+	Frame the model	Обрамити модель
+	Features	Функції
+	Search for feature	Пошук функції
+	No features yet	Функцій ще немає
+	Suppressed	Пригнічено
+	Built	Побудовано
+	Pending	Очікує
+	Failed	Помилка
+	Blocked	Заблоковано
+	Blocked by {feature}	Заблоковано через {feature}
+	Parameters	Параметри
+	No parameters yet	Параметрів ще немає
+	Not evaluated	Не обчислено

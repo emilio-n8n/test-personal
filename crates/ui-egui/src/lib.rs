@@ -39,12 +39,15 @@ pub mod menus;
 pub mod opening;
 pub mod options;
 pub mod palettes;
+pub mod panels3;
 pub mod parametric;
 pub mod plotstyles;
 pub mod quick;
 pub mod shortcut_menus;
 pub mod theme;
 pub mod viewcube;
+pub mod viewport3;
+pub mod viewport_state;
 pub mod vpscale;
 
 pub mod exchange;

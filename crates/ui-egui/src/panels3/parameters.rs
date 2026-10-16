@@ -69,13 +69,7 @@ impl ParamRow {
 
     /// A parameter that does not evaluate, and why.
     pub fn broken_row(name: &str, formula: &str, error: &str) -> ParamRow {
-        ParamRow {
-            name: name.to_string(),
-            formula: formula.to_string(),
-            value: None,
-            error: Some(error.to_string()),
-            group: ParamGroup::User,
-        }
+        ParamRow { name: name.to_string(), formula: formula.to_string(), value: None, error: Some(error.to_string()), group: ParamGroup::User }
     }
 
     /// Whether this parameter has a value the rebuild can use.
@@ -220,12 +214,12 @@ pub fn show(ui: &mut egui::Ui, rows: &[ParamRow], panel: &mut ParameterPanel) ->
         });
     }
     // The new-parameter button sits under the grid, where a person looking for it expects it. It wins
-// over anything a row asked for in the same frame: adding a parameter is not something a person
-// does by accident while they are fixing another one.
-if ui.small_button(crate::tl!("ƒx  New User Parameter")).on_hover_text(crate::tl!("Creates a user parameter")).clicked() {
-    return Some(ParamAction::Add);
-}
-action
+    // over anything a row asked for in the same frame: adding a parameter is not something a person
+    // does by accident while they are fixing another one.
+    if ui.small_button(crate::tl!("ƒx  New User Parameter")).on_hover_text(crate::tl!("Creates a user parameter")).clicked() {
+        return Some(ParamAction::Add);
+    }
+    action
 }
 
 /// A value with no trailing zeros, so `10` does not read as `10.0000` next to `2.5`.

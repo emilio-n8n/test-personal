@@ -272,7 +272,13 @@ impl OrbitCamera {
             return;
         }
         let next = self.distance * factor;
-        self.distance = if next.is_finite() { next } else if factor > 1.0 { MAX_DISTANCE } else { MIN_DISTANCE };
+        self.distance = if next.is_finite() {
+            next
+        } else if factor > 1.0 {
+            MAX_DISTANCE
+        } else {
+            MIN_DISTANCE
+        };
         self.sanitize();
     }
 
@@ -349,8 +355,8 @@ pub struct Gesture {
     pub drag: Vec2,
     /// The pan modifier is held, so the drag moves the target instead of orbiting.
     pub panning: bool,
-    /// Wheel notches since the last frame (a pinch reports a fraction of one), in the same sense
-    /// as egui's `zoom_delta`: positive zooms **in**.
+    /// Wheel notches since the last frame, in the same sense as egui's `zoom_delta`:
+    /// positive zooms **in**.
     pub wheel: f64,
     /// Arrow-key presses since the last frame, as (−1 … 1) per axis.
     pub keys: Vec2,
@@ -417,7 +423,9 @@ impl OrbitCamera {
             self.dolly(-g.wheel);
         }
         if g.dolly_keys != 0.0 {
-            self.dolly(g.dolly_keys);
+            // `+`/`-` are notches in the same sense as the wheel: positive zooms in, while
+            // `dolly` is positive for pull back.
+            self.dolly(-g.dolly_keys);
         }
         self.sanitize();
         *self != before
@@ -445,12 +453,7 @@ impl PickRequest {
 
     /// Every number finite, with a positive image to be a pixel of.
     pub fn is_valid(&self) -> bool {
-        self.px.is_finite()
-            && self.py.is_finite()
-            && self.width.is_finite()
-            && self.height.is_finite()
-            && self.width > 0.0
-            && self.height > 0.0
+        self.px.is_finite() && self.py.is_finite() && self.width.is_finite() && self.height.is_finite() && self.width > 0.0 && self.height > 0.0
     }
 }
 
@@ -522,13 +525,7 @@ impl ViewportState {
         if !request.is_valid() {
             return None;
         }
-        cadcraft_render::picking::ray_through_pixel(
-            &self.camera.camera(),
-            request.px,
-            request.py,
-            request.width,
-            request.height,
-        )
+        cadcraft_render::picking::ray_through_pixel(&self.camera.camera(), request.px, request.py, request.width, request.height)
     }
 
     /// How big a pixel of a panel `height_points` tall is, in world units.

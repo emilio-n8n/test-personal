@@ -521,25 +521,18 @@ impl Sketch {
             return Err(SketchError::TooManyConstraints { got: self.constraints.len(), limit: MAX_CONSTRAINTS });
         }
 
-        // Check for duplicate point ids
+        // Check for duplicate point ids.
+        //
+        // Only two `Point` entities claiming the same id are a duplicate. A line, circle or arc
+        // merely *refers* to a point by id -- a line whose endpoint is a corner the sketch also
+        // declares as a `Point` is the normal way to build one, not a collision. Inserting those
+        // referenced ids here refused every sketch that had both, before the solver ever ran.
         let mut seen = std::collections::HashSet::new();
         for e in &self.entities {
-            let id = match e {
-                SketchEntity::Point { id, .. } => *id,
-                SketchEntity::Line { a, b } => {
-                    if !seen.insert(*a) {
-                        return Err(SketchError::DuplicatePointId(*a));
-                    }
-                    if !seen.insert(*b) {
-                        return Err(SketchError::DuplicatePointId(*b));
-                    }
-                    continue;
-                }
-                SketchEntity::Circle { centre, .. } => *centre,
-                SketchEntity::Arc { centre, .. } => *centre,
-            };
-            if !seen.insert(id) {
-                return Err(SketchError::DuplicatePointId(id));
+            if let SketchEntity::Point { id, .. } = e
+                && !seen.insert(*id)
+            {
+                return Err(SketchError::DuplicatePointId(*id));
             }
         }
 
@@ -753,11 +746,7 @@ fn constraint_name(c: &SketchConstraint) -> String {
         SketchConstraint::Radius { name, .. } => (name, "Radius"),
         SketchConstraint::Angle { name, .. } => (name, "Angle"),
     };
-    if name.is_empty() {
-        kind.to_string()
-    } else {
-        name.clone()
-    }
+    if name.is_empty() { kind.to_string() } else { name.clone() }
 }
 
 impl Default for Sketch {

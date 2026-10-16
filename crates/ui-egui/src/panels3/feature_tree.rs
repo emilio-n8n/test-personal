@@ -421,11 +421,7 @@ mod tests {
 
     /// Where the label `needle` was painted, so a test can click exactly it.
     fn label_pos(h: &Harness<'static, Fixture>, needle: &str) -> Pos2 {
-        texts(h)
-            .iter()
-            .find(|(t, _)| t == needle)
-            .map(|(_, r)| r.center())
-            .unwrap_or_else(|| panic!("{needle} was not painted:\n{}", painted(h)))
+        texts(h).iter().find(|(t, _)| t == needle).map(|(_, r)| r.center()).unwrap_or_else(|| panic!("{needle} was not painted:\n{}", painted(h)))
     }
 
     fn click(h: &mut Harness<'static, Fixture>, at: Pos2) {
@@ -554,7 +550,10 @@ mod tests {
         assert_eq!(blocked.label(), "Blocked");
         assert!(!FeatureRow::built("a", "cut").needs_attention());
         assert!(FeatureRow { state: FeatureState::Failed("x".into()), ..FeatureRow::default() }.needs_attention(), "a failed row needs attention");
-        assert!(FeatureRow { state: FeatureState::Blocked { by: "a".into(), message: String::new() }, ..FeatureRow::default() }.needs_attention(), "a blocked row too");
+        assert!(
+            FeatureRow { state: FeatureState::Blocked { by: "a".into(), message: String::new() }, ..FeatureRow::default() }.needs_attention(),
+            "a blocked row too"
+        );
         assert_eq!(FeatureRow::default().state, FeatureState::Built, "a row that says nothing is built");
     }
 }

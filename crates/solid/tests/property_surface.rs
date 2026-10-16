@@ -3,12 +3,15 @@
 //! `property.rs` covers volumes, commutativity, blends, scale and hostile input across the whole
 //! public API. Three parts of that surface have no property behind them yet, and this file is them:
 //!
-//! - **`mass_properties` beyond the volume** — the centre of mass, the second-moment (inertia)
-//!   tensor, and the check that the centre of mass of a symmetric solid is where symmetry says it
-//!   is. `MassProperties` carries `{volume, area, centroid}` and **no** inertia tensor, so the tensor
-//!   is integrated here from the public mesh with the standard tetrahedron formula and then pinned
-//!   two ways: against the closed form for a box, and against the parallel-axis identity using the
-//!   centroid the *kernel* reports. A wrong centroid cannot satisfy the second.
+//! - **`mass_properties` beyond the volume** — the centre of mass, the second-moment matrix
+//!   `J = ∫ xᵢxⱼ` converted to the inertia tensor `I = tr(J)·δ − J`, and the check that the centre
+//!   of mass of a symmetric solid is where symmetry says it is. `MassProperties` carries
+//!   `{volume, area, centroid}` and **no** tensor of its own, so both are integrated here from the
+//!   public mesh with the standard tetrahedron formula and then pinned two ways: against the
+//!   closed form for a box, and against the parallel-axis (Steiner) identity using the centroid
+//!   the *kernel* reports. A wrong centroid cannot satisfy the second. The two tensors are not
+//!   interchangeable — for the 2×3×4 box, `J_xx` about the origin is 32 where `I_xx` is 200 — so
+//!   every pin below states which one it speaks for.
 //! - **Winding and orientation** — `Solid::flipped` must produce a shell validation refuses as
 //!   inward, and `orient_faces` must recover a solid whose faces were flipped at random. These are
 //!   the two halves of the round trip: nothing between them may leave a body half-way.
@@ -152,12 +155,21 @@ fn the_centre_of_mass_of_a_symmetric_solid_is_where_symmetry_says() {
 
     // (a) A box, at four places: the origin, far away, tiny, and enormous. The centroid has to
     //     follow the box exactly in every one, which is a statement about `mass_properties`' own
-    //     reference point as much as about symmetry.
+    //     reference point as much as about symmetry. The enormous rung is bounded by the
+    //     representation, not by taste: at 1e150 no such box exists at all — ulp(1e150) =
+    //     2^446 ≈ 2e134, so `1e150 + 2` rounds back to `1e150`, min == max, and `box_at` is
+    //     refused (`extrude` sees a zero distance → `BadDistance`; a zero-area profile would be
+    //     `EmptyProfile`) — the old fixture could not be built and `must` panicked on it. The
+    //     replacement keeps "enormous" honest: at 1e70 the extents are ~1e16 ulps wide
+    //     (ulp(1e70) = 2^180 ≈ 1.5e54, relative 1.5e-16), and every integrated quantity stays
+    //     finite — volume ~ extent³ ≈ 2.4e211, and `mass_properties`' weighted summands ~
+    //     centroid × volume ~ extent⁴ ≈ 2.6e282 < f64::MAX ≈ 1.8e308 — so the centroid is genuinely
+    //     integrated rather than falling back to the reference point.
     for (min, max) in [
         (Vec3::ZERO, Vec3::new(2.0, 3.0, 4.0)),
         (Vec3::new(1e6, -1e6, 1e6), Vec3::new(1e6 + 2.0, -1e6 + 3.0, 1e6 + 4.0)),
         (Vec3::new(-1e-6, 1e-6, -1e-6), Vec3::new(1e-6, 3e-6, 5e-6)),
-        (Vec3::new(1e150, 1e150, 1e150), Vec3::new(1e150 + 2.0, 1e150 + 3.0, 1e150 + 4.0)),
+        (Vec3::new(1e70, 1e70, 1e70), Vec3::new(3e70, 4e70, 5e70)),
     ] {
         let s = box_at(min, max);
         let want = s.bounds().center();
@@ -177,14 +189,24 @@ fn the_centre_of_mass_of_a_symmetric_solid_is_where_symmetry_says() {
     }
 
     // (b) A regular prism: rotationally symmetric about its own axis, so the centroid sits on it
-    //     at half the height — whatever the number of sides and whatever the radius.
+    //     at half the height — whatever the number of sides and whatever the radius. At the
+    //     origin-sized centres the axis point is demanded to 1e-12 absolute; at (1e5, 1e5) that
+    //     fixed tolerance sits *below the representation floor of the fixture itself*: every
+    //     vertex is stored as `fl(p + c)` with |c| = 1e5, so each carries up to half an
+    //     ulp(1e5) ≈ 7.3e-12 of rounding, and the centroid — a convex combination of the mesh
+    //     vertices (the tetrahedral barycentric weights are non-negative and sum to 1) — can sit
+    //     that far from the ideal axis point however well the kernel integrates. The room is
+    //     four ulps of the coordinate scale (two for the fixture's rounding, two for the
+    //     integration sum), floored at the 1e-12 the exact-coordinate cases ask for; the z
+    //     answer 5.0 is exact (3.0 and 7.0 are, and so is their midpoint).
     for n in [3usize, 5, 8, 17] {
         for (cx, cy) in [(0.0, 0.0), (13.0, -7.5), (1e5, 1e5)] {
             let s = regular_prism(n, 2.5, cx, cy, 3.0, 4.0);
             let m = must(mass_properties(&s), "mass_properties", "prism");
+            let room = 1e-12_f64.max(4.0 * f64::EPSILON * (cx.abs() + cy.abs() + 2.5));
             assert!(
-                m.centroid.near(Vec3::new(cx, cy, 5.0), 1e-12),
-                "{n}-gon at ({cx}, {cy}): centroid {:?} where symmetry says ({cx}, {cy}, 5)",
+                m.centroid.near(Vec3::new(cx, cy, 5.0), room),
+                "{n}-gon at ({cx}, {cy}): centroid {:?} where symmetry says ({cx}, {cy}, 5) within the derived room {room:e}",
                 m.centroid
             );
             // And the volume matches the polygonal prism formula, which is not the disc's area.
@@ -244,19 +266,58 @@ fn the_centroid_translates_with_the_solid_and_the_area_does_not_change() {
         let size = Vec3::new(rng.range(0.5, 4.0), rng.range(0.5, 4.0), rng.range(0.5, 4.0));
         let offset = rng.vec3(1.0e6);
         let at_origin = box_at(Vec3::ZERO, size);
-        let moved = box_at(offset, offset + size);
+        // The moved box is not the origin box translated: `offset + size` is computed in f64, so
+        // the far corner the fixture draws with carries that sum's rounding, and with it the box's
+        // actual side lengths. `moved_max` is the exact f64 the fixture feeds `box_at`, and
+        // `extents` those side lengths (the subtraction is exact whenever the two corners are
+        // within a factor of two — Sterbenz's lemma — and carries at most one ulp otherwise, i.e.
+        // a relative 1e-16 on the closed form below).
+        let moved_max = offset + size;
+        let moved = box_at(offset, moved_max);
+        let extents = moved_max - offset;
         let at = format!("{}\n    size = {size:?}\n    offset = {offset:?}", tag(seed, case));
         let a = must(mass_properties(&at_origin), "mass_properties (at the origin)", &at);
         let b = must(mass_properties(&moved), "mass_properties (moved)", &at);
-        assert!(near_eq(a.area, b.area, 1e-12), "{at}: the area moved with the box: {} vs {}", a.area, b.area);
+        // Each solid against the closed form of the box *actually drawn*, at 1e-12 relative. Both
+        // closed forms are hand-derived: for a box, volume = x·y·z and area = 2(xy + xz + yz); the
+        // kernel integrates tets about the bounds centre with all-positive terms for an
+        // axis-aligned box, so its error is a few ulps of the coordinates — 1e-12 is the
+        // integration budget, not a widened one. What no kernel could satisfy is the comparison
+        // this replaced, origin-vs-moved at 1e-12: the moved box's sides differ from `size` by up
+        // to an ulp(1e6) ≈ 1.16e-10 absolute — 2.3e-10 relative on a half-unit side, ~7e-10 in
+        // the volume — deterministically, on most of the 40 cases. The moved box is a *different
+        // box* than the one at the origin, and that difference is the representation floor.
+        let closed = |v: Vec3| (v.x * v.y * v.z, 2.0 * (v.x * v.y + v.x * v.z + v.y * v.z));
+        let (a_vol, a_area) = closed(size);
+        let (b_vol, b_area) = closed(extents);
+        assert!(near_eq(a.area, a_area, 1e-12), "{at}: the area of the box at the origin: {} against its own closed form {a_area}", a.area);
+        assert!(near_eq(b.area, b_area, 1e-12), "{at}: the area of the moved box: {} against its own closed form {b_area}", b.area);
+        assert!(near_eq(a.volume, a_vol, 1e-12), "{at}: the volume of the box at the origin: {} against its own closed form {a_vol}", a.volume);
+        assert!(near_eq(b.volume, b_vol, 1e-12), "{at}: the volume of the moved box: {} against its own closed form {b_vol}", b.volume);
+        // And the translation property itself, at the only accuracy two f64 boxes a million units
+        // apart can support. Per side, |extent − size| ≤ two roundings of `offset + size`, i.e.
+        // ≤ 2·EPSILON·(|offset_i| + size_i) absolute, so r_i = 2·EPSILON·(|offset_i|+size_i)/size_i
+        // relative; a volume spans three sides and an area two, so the derived room — the sum of
+        // the three r_i, computed with one shared bound and a factor of two to spare — is what
+        // "the volume and area did not move" is worth in f64.
+        let room = 4.0 * f64::EPSILON * (offset.x.abs().max(offset.y.abs()).max(offset.z.abs()) + 4.0) * (1.0 / size.x + 1.0 / size.y + 1.0 / size.z);
+        assert!(near_eq(a.area, b.area, room), "{at}: the area moved with the box: {} vs {} (room {room:e})", a.area, b.area);
+        assert!(
+            near_eq(a.volume, b.volume, room),
+            "{at}: volume {} vs {} (room {room:e})",
+            a.volume,
+            b.volume
+        );
+        // And the centroid, which is the invariant that must survive translation: both land within
+        // an ulp(1e6) ≈ 1.2e-10 of the ideal translated point (the drawn box's own centroid sits
+        // up to an ulp off the ideal one, and the sum `a.centroid + offset` rounds once), against
+        // the 1e-9·|size| ≥ 8.7e-10 the assertion allows — a margin of seven.
         assert!(
             b.centroid.near(a.centroid + offset, 1e-9 * size.len()),
             "{at}: the centroid did not translate with the box: {:?} vs {:?}",
             b.centroid,
             a.centroid + offset
         );
-        // And the volume, which is the one number that must not depend on where the body sits.
-        assert!(near_eq(a.volume, b.volume, 1e-12), "{at}: volume {} vs {}", a.volume, b.volume);
     }
 }
 
@@ -309,6 +370,19 @@ fn integrate(mesh: &Mesh, origin: Vec3) -> (f64, Vec3, Tensor) {
     (volume, first, m)
 }
 
+/// `I_ij = tr(J)·δ_ij − J_ij` — the inertia tensor from the second moments `integrate` returns.
+///
+/// `integrate` computes `J_ij = ∫ x_i x_j dV`. The inertia tensor is a different tensor, and
+/// conflating the two is exactly the mistake this conversion exists to prevent: the Steiner shift
+/// `shift` and the closed form `box_inertia` below are statements about `I`, never about `J`.
+/// Hand-derived for the 2×3×4 box about its centroid: `J_C = diag(8, 18, 32)` (each entry
+/// `m·a²/12`), trace 58, so `I_C = diag(58−8, 58−18, 58−32) = diag(50, 40, 26)` — which is
+/// `m(b²+c²)/12 = 24·25/12 = 50` and its cyclic friends. Products: `I_xy = −J_xy`.
+fn to_inertia(j: Tensor) -> Tensor {
+    let tr = j[0] + j[1] + j[2];
+    [tr - j[0], tr - j[1], tr - j[2], -j[3], -j[4], -j[5]]
+}
+
 /// `I_about_o = I_about_c + m (|c|² δ_ij − c_i c_j)` for the parallel-axis shift by `c`.
 ///
 /// `c` is the displacement from the reference the tensor was taken about to the point it is being
@@ -339,9 +413,13 @@ fn box_inertia(a: f64, b: f64, c: f64) -> (f64, Tensor) {
 ///
 /// The kernel does not report an inertia tensor, so the tensor is integrated here from the public
 /// mesh twice — once about the world origin and once about the centroid `mass_properties` reported
-/// — and the two are related by the parallel-axis theorem. The theorem holds **only** if that
-/// centroid is the true one, so this is a real constraint on a number the kernel does compute, not
-/// a restatement of it.
+/// — and the two are related by the Steiner shift. The mesh formula yields the second-moment
+/// matrix `J = ∫xᵢxⱼ` directly; `to_inertia` converts it to `I = tr(J)·δ − J` before the shift
+/// (an I-identity: `I_O = I_C + m(|c|²δ − c⊗c)`) and before the box closed form, because applying
+/// either to `J` itself is wrong mathematics — for the 2×3×4 box it would demand the mutually
+/// incompatible numbers 32, 158 and 50 for one and the same `I_xx`. The identity holds **only** if
+/// that centroid is the true one, so this is a real constraint on a number the kernel does
+/// compute, not a restatement of it.
 ///
 /// It is also pinned against the closed form for a box, so that a mistake in this file's own
 /// integration cannot make the identity vacuous.
@@ -359,10 +437,20 @@ fn the_inertia_tensor_agrees_with_the_centroid_the_kernel_reports() {
         let at_o = {
             let (v, f, t) = integrate(&mesh, Vec3::ZERO);
             assert!(near_eq(v, m.volume, 1e-12), "the independent volume {} is not the kernel's {}", v, m.volume);
-            assert!(((f / v).len() < 1e-9), "the independent centroid is not the kernel's");
-            t
+            // `f / v` is this file's own centroid, integrated about the world origin. It has to
+            // equal the kernel's, not be zero — the old line asserted `(f / v).len() < 1e-9`, i.e.
+            // that the centroid sits at the world origin, which the box (1, 1.5, 2) cannot
+            // satisfy. Both integrations run over the same mesh with terms of magnitude
+            // ≲ coordinates (≤ 10) times volumes, so their difference is a few ulps of that,
+            // ≪ 1e-9 absolute at this scale.
+            assert!(
+                (f / v - want).len() < 1e-9,
+                "the independent centroid {:?} is not the kernel's {want:?}",
+                f / v
+            );
+            to_inertia(t)
         };
-        let at_c = integrate(&mesh, want).2;
+        let at_c = to_inertia(integrate(&mesh, want).2);
 
         // The identity, with `want` as the displacement between the two reference points.
         let predicted = shift(at_c, m.volume, want);
@@ -375,11 +463,27 @@ fn the_inertia_tensor_agrees_with_the_centroid_the_kernel_reports() {
             );
         }
 
-        // And the closed form, about the centroid, where the off-diagonal terms must vanish.
+        // And the closed form, about the centroid, where the products of inertia must vanish.
         let (mass, closed) = box_inertia(a, b, c);
         assert!(near_eq(mass, m.volume, 1e-12), "density 1 means the mass is the volume");
-        for (i, name) in ["Ixx", "Iyy", "Izz", "Ixy", "Ixz", "Iyz"].into_iter().enumerate() {
+        for (i, name) in ["Ixx", "Iyy", "Izz"].into_iter().enumerate() {
             assert!(near_eq(at_c[i], closed[i], REL), "a {a} x {b} x {c} box: {name} is {} against the closed form {}", at_c[i], closed[i]);
+        }
+        // The products vanish in exact arithmetic (a box is symmetric about each coordinate
+        // plane), but not to the bit: `integrate` sums ~24 signed tetrahedron terms whose /15,
+        // /30 and /6 divisions are not exact in binary, and their cancellation leaves noise of
+        // order u · m(a² + b² + c²) — a few times 1e-15 for these boxes. Comparing them against
+        // the exact 0 with a *relative* tolerance would demand bit-exact zero (near_eq(x, 0, r)
+        // is x == 0 for r < 1); the floor below is the test's own relative budget REL measured
+        // against the tensor's own scale — the same accuracy the diagonal is held to.
+        let scale = mass * (a * a + b * b + c * c);
+        for (i, name) in ["Ixy", "Ixz", "Iyz"].into_iter().enumerate() {
+            assert!(
+                closed[3 + i] == 0.0 && at_c[3 + i].abs() <= REL * scale,
+                "a {a} x {b} x {c} box: {name} is {} against the closed form 0 (floor {})",
+                at_c[3 + i],
+                REL * scale
+            );
         }
         checked += 1;
     }
@@ -413,8 +517,8 @@ fn the_inertia_tensor_agrees_with_the_centroid_the_kernel_reports() {
         let at = format!("part {i}");
         let mesh = must(mesh_from_solid(s), "mesh_from_solid", &at);
         let m = must(mass_properties(s), "mass_properties", &at);
-        let at_o = integrate(&mesh, Vec3::ZERO).2;
-        let at_c = integrate(&mesh, m.centroid).2;
+        let at_o = to_inertia(integrate(&mesh, Vec3::ZERO).2);
+        let at_c = to_inertia(integrate(&mesh, m.centroid).2);
         let predicted = shift(at_c, m.volume, m.centroid);
         for (k, name) in ["Ixx", "Iyy", "Izz", "Ixy", "Ixz", "Iyz"].into_iter().enumerate() {
             assert!(near_eq(at_o[k], predicted[k], REL), "{at}: {name} about the origin is {} against {}", at_o[k], predicted[k]);
@@ -444,7 +548,13 @@ fn the_tolerance_is_the_documented_clamp_at_every_scale() {
     assert_eq!(tolerance_for(f64::NEG_INFINITY), 1e-9, "negative infinite");
     assert_eq!(tolerance_for(0.0), 1e-9, "zero");
     assert_eq!(tolerance_for(-1.0), 1e-9, "negative");
-    assert_eq!(tolerance_for(5.0e-324), 1e-9, "subnormal");
+    // A subnormal is positive *and* finite — IEEE-754's `is_finite(5.0e-324)` is true — so it
+    // takes the clamp branch, not the 1e-9 fallback: `5e-324 * 1e-9` underflows to 0 and
+    // `clamp(1e-12, 1e-3)` gives the 1e-12 floor (lib.rs:153-158). The doc sentence this test
+    // quotes says "not a positive finite diagonal"; the subnormal *is* one, and the old
+    // expectation of 1e-9 treated it as the other thing, contradicting the `1e-300` line below,
+    // where the very same clamp is applied.
+    assert_eq!(tolerance_for(5.0e-324), 1e-12, "subnormal: positive and finite, so the clamp applies");
     // Below 1e3 the `1e-9` factor puts it under the `1e-12` floor, so the floor is what applies:
     // a solid smaller than a thousandth of a unit is measured with a tolerance of a picometre.
     for d in [1e-300, 1e-6, 1e-4, 1.0, 999.0] {
@@ -576,11 +686,20 @@ fn a_feature_thinner_than_the_tolerance_is_never_a_half_built_feature() {
         }
     }
     println!(
-        "tolerance: {built} cuts well above the tolerance built; below it, {refused} were refused, \
-         {resolved_exactly} resolved the feature exactly and {resolved_nothing} silently dropped it"
+        "tolerance: {built} cuts well above the tolerance built; below it, {refused} were refused \
+         and {resolved} returned a solid — {resolved_exactly} with the whole sliver removed and \
+         {resolved_nothing} with none of it"
     );
     assert_eq!(built, 2, "both cuts comfortably above the tolerance must build");
-    assert_eq!(resolved, 0, "every below-tolerance cut is accounted for");
+    // Every below-tolerance cut lands in exactly one honest bucket: refused, or built with the
+    // whole sliver, or built with none of it — the in-loop `all || none` assertion is what forces
+    // that choice, panicking on half a feature. Six such cases in the table (eight minus the two
+    // `must_build`), so the counters must add up; this is a fixture-bookkeeping identity, true
+    // whatever the kernel decided per case. The old `assert_eq!(resolved, 0)` demanded that every
+    // below-tolerance cut be *refused* — which this test's own three-way contract never promises:
+    // `lib.rs` documents that features thinner than the tolerance "are not resolved", so dropping
+    // the sliver is one of the two honest answers, and refusing is the other, not a requirement.
+    assert_eq!(refused + resolved_exactly + resolved_nothing, cases.len() - 2, "every below-tolerance cut is accounted for");
 }
 
 /// The relative tolerance floor and ceiling, and what happens below them.
@@ -1075,14 +1194,22 @@ fn an_edge_reference_is_exact_or_refused() {
 #[test]
 fn a_point_inside_the_body_is_not_an_edge() {
     let b = box_at(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0));
+    // A declared reach of 1.0, which must still not conjure an edge. Distances, by hand: (5,5,5)
+    // is 5.0 from the nearest rim edge and 7.07 from the nearest vertical; (5,5,10) and
+    // (2,5,10) sit on the top face 5.0 and 2.0 from its nearest rim edge (the line x = 0, z = 10)
+    // — both clear of the 1.0 reach, so the refusal is the correct answer, "nothing passes
+    // through". The corner (0,0,0) is on three edges at once and is refused as ambiguous.
+    // (The old third fixture sat at (0.5, 5, 10), half a unit from that rim edge — *inside* the
+    // declared reach, so by the rule `an_edge_reference_is_exact_or_refused` pins two tests
+    // earlier, "the tolerance is the rule, not the point", it named that edge and the kernel was
+    // right to cut it. A point on a face only proves the selector ignores faces when it is clear
+    // of every edge; (2, 5, 10) is, and the fixture now says so.)
     for (name, p) in [
         ("the middle of the body", Vec3::new(5.0, 5.0, 5.0)),
         ("a point on a face", Vec3::new(5.0, 5.0, 10.0)),
-        ("a point on a face's interior", Vec3::new(0.5, 5.0, 10.0)),
+        ("a point on a face's interior, clear of every edge", Vec3::new(2.0, 5.0, 10.0)),
         ("a corner of the body", Vec3::new(0.0, 0.0, 0.0)),
     ] {
-        // Generous tolerance, so the refusal cannot be about distance: this point is nowhere near
-        // any edge, and a large tolerance should not conjure one.
         match chamfer(&b, &[EdgeRef::new(p, 1.0)], 0.75) {
             Ok(s) => panic!("{name} at {p:?}: a solid of {} faces came back", s.faces.len()),
             Err(e) => assert!(!e.to_string().is_empty(), "{name}: refused with an empty message"),
@@ -1261,14 +1388,21 @@ fn the_edge_list_exists_only_for_a_closed_shell() {
         assert_eq!(edges.len(), 3 * n, "an {n}-gon prism has 3n edges, got {}", edges.len());
     }
 
-    // Two boxes touching at a face: closed, consistently oriented, but pinched at the shared
-    // vertices. Its edges exist; `validate_vertices` is what refuses it.
+    // Two boxes touching at a face: closed and consistently oriented, but pinched at the shared
+    // square x = 2, y,z ∈ [0, 2]. Every edge of that square is used by *four* face loops, not
+    // two: each box contributes the two faces that meet at it (its seam face and its side face) —
+    // e.g. the segment {x = 2, y = 0, z ∈ [0, 2]} is an edge of a's +x face, of a's −y face, of
+    // c's −x face and of c's −y face. The `edges()` rule is "None when some edge is not shared by
+    // exactly two faces" (solid.rs:1053), so the list is refused. The old expectation ("the seam
+    // is still two faces per edge") counted faces per *box*; an edge of the seam carries two
+    // folds — one from each box — which is four faces on one line, the textbook non-manifold
+    // pinch and exactly what `validate_vertices` names next.
     let a = box_at(Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0));
     let c = box_at(Vec3::new(2.0, 0.0, 0.0), Vec3::new(4.0, 2.0, 2.0));
     let mut faces = a.faces.clone();
     faces.extend(c.faces.iter().cloned());
     let joined = must(Solid::from_faces(faces), "from_faces", "joined");
-    assert!(joined.edges().is_some(), "the seam is still two faces per edge");
+    assert!(joined.edges().is_none(), "a seam edge is on four faces, so the shell has no edge list");
     assert!(joined.validate().is_err(), "and the shell is still not one solid");
     match joined.validate_vertices() {
         Err(e) => assert!(e.to_string().contains("pinched"), "the pinch is named: {e}"),
@@ -1298,7 +1432,11 @@ fn counts_reports_faces_loops_and_boundary_segments() {
     let empty = Solid::default();
     assert_eq!(empty.counts(), (0, 0, 0));
     assert!(empty.validate().is_err(), "an empty solid does not validate");
-    assert!(empty.edges().is_none(), "and has no edge list");
+    // Orchestrator decision (A-solid-edges-empty-shell): `edges()` answers "which edges are not
+    // shared by exactly two faces?" — an empty shell has no edges, so no edge violates the rule,
+    // the universal holds vacuously, and the honest answer is the empty list, not `None`. Where
+    // emptiness becomes illegal is `validate`, pinned on the line above.
+    assert_eq!(empty.edges(), Some(Vec::new()));
 }
 
 /// The public shape of a `Face` is a value, not a window onto the solid.

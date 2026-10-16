@@ -184,9 +184,15 @@ fn gesture_of(ui: &egui::Ui, response: &egui::Response, wants_keys: bool) -> Ges
     }
     // The wheel belongs to the panel whenever the pointer is over it, focused or not: a person
     // scrolls over the thing they are looking at. A wheel anywhere else in the panel belongs to
-    // whatever is under the pointer there.
-    let wheel = if response.hovered() { ui.input(|i| i.zoom_delta()) } else { 0.0 };
-    gesture.wheel = if wheel.is_finite() { f64::from(wheel) } else { 0.0 };
+    // whatever is under the pointer there. Read from the raw wheel events, as the 2D canvas
+    // does: egui's smoothed delta spreads a notch over several frames, and `zoom_delta` is the
+    // pinch factor (1.0 when idle), not the wheel.
+    gesture.wheel = if response.hovered() {
+        let opts = ui.ctx().options(|o| o.input_options);
+        ui.input(|i| wheel_notches(&i.raw.events, &opts, response.rect.height()))
+    } else {
+        0.0
+    };
     if wants_keys {
         use egui::Key;
         ui.input(|i| {
@@ -217,6 +223,35 @@ fn gesture_of(ui: &egui::Ui, response: &egui::Response, wants_keys: bool) -> Ges
         });
     }
     gesture
+}
+
+/// This frame's wheel input in notches, from the raw wheel events: one `Line` step is one
+/// notch, however egui smooths it. Units convert to points as egui does, and events egui turns
+/// into a pinch zoom or a sideways scroll are left out, as it does. Negated into the camera's
+/// sense (positive zooms in): a notch rolled away from the user pulls the eye back, which is
+/// what this panel's own tests pin (see `docs/agents/questions/Q-ui-wheel-sign.md`).
+fn wheel_notches(events: &[egui::Event], opts: &egui::InputOptions, page: f32) -> f64 {
+    let scale = opts.line_scroll_speed;
+    if !scale.is_finite() || scale <= 0.0 {
+        return 0.0;
+    }
+    let points: f32 = events
+        .iter()
+        .filter_map(|e| match e {
+            egui::Event::MouseWheel { unit, delta, modifiers, .. }
+                if !modifiers.matches_any(opts.zoom_modifier) && !modifiers.matches_any(opts.horizontal_scroll_modifier) =>
+            {
+                let per = match unit {
+                    egui::MouseWheelUnit::Point => 1.0,
+                    egui::MouseWheelUnit::Line => scale,
+                    egui::MouseWheelUnit::Page => page,
+                };
+                Some(delta.y * per)
+            }
+            _ => None,
+        })
+        .sum();
+    if points.is_finite() { -f64::from(points / scale) } else { 0.0 }
 }
 
 /// How many image pixels one point of the panel is, on each axis, or `None` when there is no
@@ -296,6 +331,11 @@ fn texture(ctx: &egui::Context, frame: &Frame) -> Option<egui::TextureHandle> {
         && c.size == [w, h]
     {
         return Some(c.texture);
+    }
+    // A hand-built frame whose buffer is not `w × h × 4` uploads nothing: epaint asserts
+    // the exact size, and a panic here would take the session's drawing with it.
+    if frame.image.data.len() != w.checked_mul(h).and_then(|p| p.checked_mul(4)).unwrap_or(usize::MAX) {
+        return None;
     }
     let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &frame.image.data);
     let texture = ctx.load_texture(FRAME_ID, image, egui::TextureOptions::LINEAR);
