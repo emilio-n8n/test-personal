@@ -90,7 +90,10 @@ impl ParamRow {
 }
 
 /// Panel state the host owns and the panel fills in.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// `Default` is written out rather than derived, because the derive would say "no decimals" and a
+/// parameter with no decimals shown is a panel that cannot read its own values.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParameterPanel {
     /// The parameter the user has selected, by name.
     pub selected: Option<String>,
@@ -159,7 +162,7 @@ pub fn show(ui: &mut egui::Ui, rows: &[ParamRow], panel: &mut ParameterPanel) ->
     } else {
         // Scroll over the whole panel so the grid's columns line up across the two groups.
         egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("cc_parameters").show(ui, |ui| {
-            egui::Grid::new("cc_param_grid").striped(true).num_columns(4).spacing(egui::vec2(10.0, 3.0)).min_col_width(50.0).show(ui, |ui| {
+            egui::Grid::new("cc_param_grid").striped(true).num_columns(4).spacing(egui::vec2(10.0, 3.0)).show(ui, |ui| {
                 for heading in ["Name", "Expression", "Value", ""] {
                     ui.label(RichText::new(crate::i18n::t(heading)).strong());
                 }
@@ -216,14 +219,13 @@ pub fn show(ui: &mut egui::Ui, rows: &[ParamRow], panel: &mut ParameterPanel) ->
             });
         });
     }
-    if let Some(a) = action {
-        return Some(a);
-    }
-    // The new-parameter button sits under the grid, where a person looking for it expects it.
-    if ui.small_button(crate::tl!("ƒx  New User Parameter")).on_hover_text(crate::tl!("Creates a user parameter")).clicked() {
-        action = Some(ParamAction::Add);
-    }
-    action
+    // The new-parameter button sits under the grid, where a person looking for it expects it. It wins
+// over anything a row asked for in the same frame: adding a parameter is not something a person
+// does by accident while they are fixing another one.
+if ui.small_button(crate::tl!("ƒx  New User Parameter")).on_hover_text(crate::tl!("Creates a user parameter")).clicked() {
+    return Some(ParamAction::Add);
+}
+action
 }
 
 /// A value with no trailing zeros, so `10` does not read as `10.0000` next to `2.5`.

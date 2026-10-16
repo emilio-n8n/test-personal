@@ -190,53 +190,58 @@ pub fn show(ui: &mut egui::Ui, rows: &[FeatureRow], tree: &mut FeatureTree) -> O
 fn row_ui(ui: &mut egui::Ui, row: &FeatureRow, tree: &mut FeatureTree, t: &Tokens) -> Option<FeatureAction> {
     let selected = tree.selected.as_deref() == Some(row.name.as_str());
     let mut action = None;
-    let response = ui.push_id(&row.name, |ui| {
-        let inner = ui.horizontal(|ui| {
-            ui.add_space(f32::from(row.depth) * INDENT);
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(GLYPH, GLYPH), Sense::hover());
-            paint_state(ui.painter(), rect, row);
-            ui.add_space(GLYPH_GAP);
-            if row.suppressed {
-                let (mark, _) = ui.allocate_exact_size(egui::vec2(GLYPH, GLYPH), Sense::hover());
-                paint_hidden(ui.painter(), mark, t.text_dim);
+    let response = ui
+        .push_id(("row", &row.name), |ui| {
+            let inner = ui.horizontal(|ui| {
+                ui.add_space(f32::from(row.depth) * INDENT);
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(GLYPH, GLYPH), Sense::hover());
+                paint_state(ui.painter(), rect, row);
                 ui.add_space(GLYPH_GAP);
-            }
-            if row.rolled_back {
-                let (mark, _) = ui.allocate_exact_size(egui::vec2(GLYPH, GLYPH), Sense::hover());
-                paint_rolled_back(ui.painter(), mark, t.text_dim);
-                ui.add_space(GLYPH_GAP);
-            }
-            let name = if row.suppressed {
-                RichText::new(&row.name).color(t.text_faint)
-            } else if selected {
-                RichText::new(&row.name).strong()
-            } else {
-                RichText::new(&row.name)
-            };
-            ui.label(name);
-            ui.label(RichText::new(&row.kind).color(t.text_faint).small());
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if selected {
-                    if ui
-                        .add(egui::Button::new(crate::tl!("Suppressed")).selected(row.suppressed).small())
-                        .on_hover_text(crate::tl!("Suppressed"))
-                        .clicked()
-                    {
-                        return Some(FeatureAction::ToggleSuppressed { name: row.name.clone() });
-                    }
-                    if ui.small_button(crate::tl!("Delete")).on_hover_text(crate::tl!("Delete")).clicked() {
-                        return Some(FeatureAction::Delete { name: row.name.clone() });
-                    }
+                if row.suppressed {
+                    let (mark, _) = ui.allocate_exact_size(egui::vec2(GLYPH, GLYPH), Sense::hover());
+                    paint_hidden(ui.painter(), mark, t.text_dim);
+                    ui.add_space(GLYPH_GAP);
                 }
-                if !row.state.is_built() {
-                    ui.label(RichText::new(crate::i18n::t(row.state.label())).color(state_color(row, t)).small());
+                if row.rolled_back {
+                    let (mark, _) = ui.allocate_exact_size(egui::vec2(GLYPH, GLYPH), Sense::hover());
+                    paint_rolled_back(ui.painter(), mark, t.text_dim);
+                    ui.add_space(GLYPH_GAP);
                 }
-                None
-            })
-            .inner
-        });
-        inner.response
-    });
+                let name = if row.suppressed {
+                    RichText::new(&row.name).color(t.text_faint)
+                } else if selected {
+                    RichText::new(&row.name).strong()
+                } else {
+                    RichText::new(&row.name)
+                };
+                ui.label(name);
+                ui.label(RichText::new(&row.kind).color(t.text_faint).small());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if selected {
+                        if ui
+                            .add(egui::Button::new(crate::tl!("Suppressed")).selected(row.suppressed).small())
+                            .on_hover_text(crate::tl!("Suppressed"))
+                            .clicked()
+                        {
+                            return Some(FeatureAction::ToggleSuppressed { name: row.name.clone() });
+                        }
+                        if ui.small_button(crate::tl!("Delete")).on_hover_text(crate::tl!("Delete")).clicked() {
+                            return Some(FeatureAction::Delete { name: row.name.clone() });
+                        }
+                    }
+                    if !row.state.is_built() {
+                        ui.label(RichText::new(crate::i18n::t(row.state.label())).color(state_color(row, t)).small());
+                    }
+                    None
+                })
+                .inner
+            });
+            // A `Ui` comes back sensing hover only, so the row has to be made clickable here or a
+            // click on the name selects nothing. `interact` keeps the row's own plane, so the
+            // buttons above still take their own clicks.
+            inner.response.interact(Sense::click())
+        })
+        .response;
     if response.clicked() {
         tree.selected = Some(row.name.clone());
         action = Some(FeatureAction::Select { name: row.name.clone() });
@@ -248,7 +253,7 @@ fn row_ui(ui: &mut egui::Ui, row: &FeatureRow, tree: &mut FeatureTree, t: &Token
     // The message is the row's own second line, always visible. Not a tooltip: a tooltip is a thing
     // a person has to know to look for, and this is the one line they came to read.
     if let Some(message) = row.state.message() {
-        ui.push_id(&row.name, |ui| {
+        ui.push_id(("message", &row.name), |ui| {
             ui.horizontal(|ui| {
                 ui.add_space(f32::from(row.depth) * INDENT + GLYPH + GLYPH_GAP);
                 ui.label(RichText::new(message).color(t.warn).small().weak());
@@ -256,7 +261,7 @@ fn row_ui(ui: &mut egui::Ui, row: &FeatureRow, tree: &mut FeatureTree, t: &Token
         });
     }
     if let Some(by) = row.state.blocked_by() {
-        ui.push_id(&row.name, |ui| {
+        ui.push_id(("blocked by", &row.name), |ui| {
             ui.horizontal(|ui| {
                 ui.add_space(f32::from(row.depth) * INDENT + GLYPH + GLYPH_GAP);
                 ui.label(RichText::new(crate::tf!("Blocked by {feature}", feature = by)).color(t.text_faint).small());
@@ -279,11 +284,11 @@ fn state_color(row: &FeatureRow, t: &Tokens) -> Color32 {
 /// The state dot: a filled disc for a built feature, a broken one for a failure, an empty ring for
 /// anything that is waiting.
 fn paint_state(p: &egui::Painter, r: Rect, row: &FeatureRow) {
-    let c = state_color(row, &Tokens::get());
-    let c = r.center();
+    let color = state_color(row, &Tokens::get());
+    let at = r.center();
     match &row.state {
-        FeatureState::Pending | FeatureState::Blocked { .. } => p.circle_stroke(c, GLYPH * 0.3, Stroke::new(1.6, c)),
-        _ => p.circle_filled(c, GLYPH * 0.3, c),
+        FeatureState::Pending | FeatureState::Blocked { .. } => p.circle_stroke(at, GLYPH * 0.3, Stroke::new(1.6, color)),
+        _ => p.circle_filled(at, GLYPH * 0.3, color),
     }
 }
 
@@ -315,9 +320,12 @@ fn paint_rolled_back(p: &egui::Painter, r: Rect, c: Color32) {
         let a = std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * 1.5 * (i as f32 / 12.0);
         pts.push(egui::pos2(mid.x + rad * a.cos(), mid.y - rad * a.sin()));
     }
-    p.add(egui::Shape::line(pts, s));
+    // The open end of the arc is the first point, and the head has to be read off it before the
+    // arc is handed to the painter.
     let tip = pts.first().copied().unwrap_or(mid);
-    p.add(egui::Shape::convex_polygon(vec![tip, tip + egui::vec2(-3.0, -1.0), tip + egui::vec2(-1.0, 3.0)], c, Stroke::NONE));
+    p.add(egui::Shape::line(pts, s));
+    // The arrow head: a triangle at the open end of the arc, in the same colour, no outline.
+    p.add(egui::Shape::convex_polygon(vec![tip, tip + egui::vec2(-3.0, -1.0), tip + egui::vec2(-1.0, 3.0)], c, Stroke::new(0.0, c)));
 }
 
 #[cfg(test)]

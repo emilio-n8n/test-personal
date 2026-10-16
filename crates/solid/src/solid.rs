@@ -182,6 +182,17 @@ impl Face {
 ///
 /// Registration is in the shell's own vertex order, so the answer does not depend on hash iteration,
 /// and a shell with nothing to weld comes back untouched rather than moved by up to half a cell.
+///
+/// # Why the corner's *number* is the identity, and not just its position
+///
+/// A corner number says two points are the same vertex without ever asking which cell either of them
+/// fell in, and that is the whole point: a single rounded index per axis (`vkey`) cannot make that
+/// promise, because its cell boundary sits half a cell inside each cell and two points that name the
+/// same corner — the last bit apart, as two faces' copies of one corner always are — land either
+/// side of it as often as not. Clusters this grid builds by distance have no such line to fall on:
+/// the search is over the corners, not over an index, so where the boundary would have been is not a
+/// question it ever asks. That is why `weld_edges` uses the grid to *move* geometry and `Solid`
+/// uses the corner *numbers* to decide identity — see the note on `vkey`.
 #[derive(Debug)]
 struct WeldGrid {
     tol: f64,
@@ -207,14 +218,19 @@ impl WeldGrid {
         )
     }
 
-    /// The canonical corner for `v`, if one is already within `tol` of it.
-    fn find(&self, v: Vec3) -> Option<Vec3> {
+    /// The number of the canonical corner for `v`, if one is already within `tol` of it.
+    fn find_index(&self, v: Vec3) -> Option<usize> {
         let (cx, cy, cz) = self.cell_of(v);
         let mut best: Option<usize> = None;
         for dx in -1..=1 {
             for dy in -1..=1 {
                 for dz in -1..=1 {
-                    let Some(list) = self.buckets.get(&(cx + dx, cy + dy, cz + dz)) else { continue };
+                    // Saturating, not wrapping: a coordinate from a file can index a cell at the
+                    // very end of the range, and `cx + 1` must be a cell that is simply empty rather
+                    // than an overflow. This runs on every vertex of every shell the crate checks, so
+                    // it has to be a place a hostile coordinate cannot break.
+                    let key = (cx.saturating_add(dx), cy.saturating_add(dy), cz.saturating_add(dz));
+                    let Some(list) = self.buckets.get(&key) else { continue };
                     for &i in list {
                         let Some(p) = self.corners.get(i) else { continue };
                         if p.dist(v) <= self.tol && best.is_none_or(|b| i < b) {
@@ -224,7 +240,12 @@ impl WeldGrid {
                 }
             }
         }
-        best.and_then(|i| self.corners.get(i).copied())
+        best
+    }
+
+    /// The canonical corner for `v`, if one is already within `tol` of it.
+    fn find(&self, v: Vec3) -> Option<Vec3> {
+        self.find_index(v).and_then(|i| self.corners.get(i).copied())
     }
 
     /// The canonical corner for `v`, registering `v` itself if nothing is within `tol` of it.
@@ -236,6 +257,26 @@ impl WeldGrid {
         self.corners.push(v);
         self.buckets.entry(key).or_default().push(self.corners.len() - 1);
         v
+    }
+
+    /// The *number* of the canonical corner for `v`, registering `v` itself if nothing within `tol`
+    /// of it does.
+    ///
+    /// The number is the identity two points share, and it is the only form of it that survives a
+    /// cell boundary: `vkey` hands back a pair of points that are within a rounding step of being
+    /// the same corner and will disagree about it the moment one of them crosses the line, while two
+    /// points that name the same corner here are the same corner whatever cells they sit in. Every
+    /// vertex-level decision in the crate — is this edge shared, is this vertex pinched, is this
+    /// shell closed — is made on these numbers.
+    fn index_of(&mut self, v: Vec3) -> usize {
+        if let Some(hit) = self.find_index(v) {
+            return hit;
+        }
+        let key = self.cell_of(v);
+        self.corners.push(v);
+        let n = self.corners.len() - 1;
+        self.buckets.entry(key).or_default().push(n);
+        n
     }
 }
 
@@ -253,6 +294,26 @@ impl WeldGrid {
 ///
 /// The inserted vertices are collinear, so no region changes shape and no area or volume moves; the
 /// point is that the *edges* then match their neighbours, which is what the shell is made of.
+///
+/// # What the snap guarantees, and what it cannot
+///
+/// It guarantees one `Vec3` per corner, written into every face that holds that corner. It cannot
+/// guarantee one *world* bit pattern per corner, and the difference matters. A face stores its loop
+/// in its own plane's frame, so the canonical number is written back through `Plane::to_local` and
+/// read again through `Plane::to_world` — and that round trip multiplies, adds and normalises, so
+/// it is not the identity. Two faces come out of this pass holding copies of one corner a unit in
+/// the last place apart, which is six orders of magnitude inside `tol` and is exactly what
+/// `tol` exists to absorb.
+///
+/// Anything that then decides "are these two points the same vertex?" by rounding a quotient has to
+/// cope with that. Rounding cannot: the cell boundary sits half a cell inside each cell, and two
+/// points a unit in the last place apart fall either side of it exactly when the drawing happens to
+/// put one there — which is what a blend whose distance is a power of two does, because every
+/// coordinate it makes is exact and lands exactly on the line. So the identity the shell's own
+/// invariants use is `WeldGrid`'s corner *number*, found by distance over the corners rather than by
+/// a single rounded index; see `vkey` and `Solid::validate`. Quantising the corner instead, to a
+/// coarser lattice, would move geometry by up to half a cell and is not offered here: the pass is
+/// required to leave a shell that has nothing to weld exactly as it found it.
 ///
 /// Quadratic in faces × edges × vertices, and skipped above [`MAX_WELD_VERTICES`] rather than
 /// spending a minute on a body nobody can look at.
@@ -449,6 +510,47 @@ mod weld_tests {
         Face::new(plane, Regions::new(vec![Region::new(points.iter().map(|p| plane.to_local(*p)).collect())])).ok()
     }
 
+    /// The face of a shell whose plane carries `p`, so a test can name a face by its geometry
+    /// rather than by the order a builder happened to emit it in.
+    ///
+    /// `p` has to be away from the face's own edges, or it lies on two planes at once: `(0.5, 0, 0)`
+    /// is on `y = 0` *and* on `z = 0`, and picking the wrong one silently tests nothing.
+    fn face_carrying(faces: &[Face], p: Vec3) -> Option<usize> {
+        faces.iter().position(|f| f.plane.distance(p).abs() <= 1e-9)
+    }
+
+    /// Where `world` sits in a face's first loop, found through the face's own frame so the answer
+    /// does not depend on how the face was built.
+    fn loop_vertex(f: &Face, world: Vec3) -> Option<usize> {
+        let plane = f.plane;
+        f.region.loops().next()?.iter().position(|p| plane.to_world(p.x, p.y).near(world, 1e-9))
+    }
+
+    /// Move one loop vertex to `world`, through the face's own frame — the same round trip
+    /// `weld_edges` writes a canonical corner back through, and therefore the same round trip that
+    /// leaves two faces' copies of one corner a unit in the last place apart.
+    fn move_loop_vertex(f: &mut Face, index: usize, world: Vec3) -> bool {
+        let plane = f.plane;
+        let Some(region) = f.region.regions_mut().first_mut() else { return false };
+        let Some(slot) = region.outer.get_mut(index) else { return false };
+        *slot = plane.to_local(world);
+        true
+    }
+
+    /// The same, for a new vertex *between* two of the loop's own.
+    ///
+    /// Only useful on an edge: a vertex off the line changes the region, and this pass is required
+    /// never to.
+    fn insert_loop_vertex(f: &mut Face, index: usize, world: Vec3) -> bool {
+        let plane = f.plane;
+        let Some(region) = f.region.regions_mut().first_mut() else { return false };
+        if index > region.outer.len() {
+            return false;
+        }
+        region.outer.insert(index, plane.to_local(world));
+        true
+    }
+
     #[test]
     fn welding_inserts_a_vertex_that_lands_on_another_faces_edge() {
         // The flat face spans an edge whole; a face standing on that edge already has a vertex in
@@ -609,6 +711,147 @@ mod weld_tests {
         let after: Vec<Vec<Vec2>> = faces.iter().flat_map(|f| f.region.loops().cloned()).collect();
         assert_eq!(before, after, "corners four tolerances apart were merged");
     }
+
+    /// One cube, one of its corners held by the face on `y = 0` *half a tolerance* from where the
+    /// other two faces hold it — a displacement that lands exactly on a rounding boundary.
+    ///
+    /// This is the shell-level statement the boundary case needs: everything within `tol` is one
+    /// point by the kernel's own definition, so the shell is the same shell either way, and the only
+    /// thing that can tell the difference is how the shell decides that two numbers name one corner.
+    /// A rounded index per axis cannot: `half / tol` is `0.5` to the bit, so the two copies are in
+    /// cells `0` and `1` and the edge they share stops being shared — the shell reads as open.
+    ///
+    /// The displacement is `tol / 2` rather than a unit in the last place because it can be placed
+    /// exactly. A last-bit displacement is the realistic one and the same code path; it cannot be
+    /// aimed at the boundary without knowing where the boundary is, which is the whole difficulty.
+    #[test]
+    fn a_corner_held_half_a_tolerance_away_is_still_one_vertex() {
+        let b = box_at(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0));
+        let tol = b.tolerance();
+        let half = tol * 0.5;
+        let mut faces = b.faces.clone();
+        // The face on `y = 0`, named by a point only that plane carries.
+        let Some(y0) = face_carrying(&faces, Vec3::new(0.5, 0.0, 0.5)) else { return };
+        let Some(at) = loop_vertex(&faces[y0], Vec3::ZERO) else { return };
+        if !move_loop_vertex(&mut faces[y0], at, Vec3::new(half, 0.0, 0.0)) {
+            return;
+        }
+        // Preconditions, asserted rather than assumed: this is the case only if the keying bound is
+        // the origin and the two copies really do straddle a cell.
+        let s = Solid::from_faces(faces).unwrap_or_default();
+        assert!(s.bounds().min.near(Vec3::ZERO, 1e-12), "nothing moved below the origin, so the bound still is: {:?}", s.bounds().min);
+        assert_ne!(vkey(Vec3::new(half, 0.0, 0.0), Vec3::ZERO, tol), vkey(Vec3::ZERO, Vec3::ZERO, tol), "the two copies must land in different cells or this test says nothing");
+        match s.validate() {
+            Ok(()) => {}
+            Err(e) => panic!("a corner {half} from its twin is still one corner: {e}"),
+        }
+        assert!((s.volume() - 1.0).abs() < 1e-8, "the cube lost or gained material: {}", s.volume());
+        assert!((s.area() - 6.0).abs() < 1e-8, "its skin moved: {}", s.area());
+    }
+
+    /// The same straddling corner, through the weld: the pass has to give both faces one number, and
+    /// a body it only re-reads must come back the body it was given.
+    #[test]
+    fn welding_a_corner_that_lands_on_a_cell_boundary_moves_no_area_and_no_volume() {
+        let b = box_at(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0));
+        let tol = b.tolerance();
+        let half = tol * 0.5;
+        let mut faces = b.faces.clone();
+        let Some(y0) = face_carrying(&faces, Vec3::new(0.5, 0.0, 0.5)) else { return };
+        let Some(at) = loop_vertex(&faces[y0], Vec3::ZERO) else { return };
+        if !move_loop_vertex(&mut faces[y0], at, Vec3::new(half, 0.0, 0.0)) {
+            return;
+        }
+        assert_ne!(vkey(Vec3::new(half, 0.0, 0.0), Vec3::ZERO, tol), vkey(Vec3::ZERO, Vec3::ZERO, tol), "the corner has to straddle a cell or this test says nothing");
+        // Moved face last, so the corner it lost is registered first and is therefore the number
+        // the other two faces keep. The pass answers with the *first* corner within tolerance, and
+        // which one that is must not be down to the order a builder emitted its faces in — so the
+        // test pins the order down rather than inheriting it.
+        faces.push(faces.remove(y0));
+
+        weld_edges(&mut faces, tol);
+        // One number for the corner, in the face that was moved and in the two that were not. They
+        // are not bit-identical — each face reads its own local copy back through its own frame —
+        // but they must be within a thousandth of a tolerance of each other, and not half a
+        // tolerance: that gap is the whole defect.
+        let after = Solid::from_faces(faces).unwrap_or_default();
+        let mut corner: Option<Vec3> = None;
+        for f in &after.faces {
+            let found = f.vertices().iter().find(|v| v.len() <= tol);
+            let Some(first) = corner else {
+                if let Some(v) = found {
+                    corner = Some(*v);
+                }
+                continue;
+            };
+            let Some(v) = found else { continue };
+            assert!((*v - first).len() <= tol * 1e-3, "a face kept its own copy of the corner, {} from its neighbour's: {first:?} vs {v:?}", (*v - first).len());
+        }
+        assert!(corner.is_some(), "no face holds the corner at all");
+        // The welded cube is the cube: the weld moves a *number*, never a point, so the only way it
+        // could come back different is by not resolving the straddle at all.
+        match after.validate() {
+            Ok(()) => {}
+            Err(e) => panic!("the welded cube is closed: {e}"),
+        }
+        assert!((after.volume() - b.volume()).abs() < 1e-12, "welding moved volume: {} -> {}", b.volume(), after.volume());
+        assert!((after.area() - b.area()).abs() < 1e-12, "welding moved area: {} -> {}", b.area(), after.area());
+        assert_eq!(after.faces.len(), b.faces.len(), "welding invented or dropped a face");
+    }
+
+    /// A closed body whose faces disagree by a vertex, welded — twice — with nothing moving.
+    ///
+    /// The face on `y = 0` carries a corner halfway along its bottom edge that the face on `z = 0`
+    /// has not got, so that neighbour's edge has to be cut there before the two faces share it. The
+    /// cut point is on the line, so no area and no volume may move; and a second pass has to find
+    /// nothing left to do and change nothing at all, which is the only way to see that the pass's
+    /// two searches — one to register the corners, one to rewrite the loops against them — reached
+    /// the same verdict both times.
+    #[test]
+    fn welding_a_missing_corner_onto_a_closed_body_is_idempotent_and_moves_no_area_or_volume() {
+        let b = box_at(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0));
+        let tol = b.tolerance();
+        let mut faces = b.faces.clone();
+        let Some(y0) = face_carrying(&faces, Vec3::new(0.5, 0.0, 0.5)) else { return };
+        let (Some(at), Some(far)) = (loop_vertex(&faces[y0], Vec3::ZERO), loop_vertex(&faces[y0], Vec3::new(1.0, 0.0, 0.0))) else { return };
+        // Between (0,0,0) and (1,0,0) — the edge the face on `z = 0` shares and has not been cut. The
+        // loop is cyclic, so the slot between two neighbours is "one past the first of them", taken
+        // modulo the loop's length; without the wrap a face that happens to start on that edge
+        // would leave this test silently doing nothing.
+        let n = faces[y0].region.loops().next().map_or(0, |l| l.len());
+        if n < 4 {
+            return;
+        }
+        let next_of = |i: usize| (i + 1) % n;
+        let between = if next_of(at) == far {
+            next_of(at)
+        } else if next_of(far) == at {
+            next_of(far)
+        } else {
+            return;
+        };
+        if !insert_loop_vertex(&mut faces[y0], between, Vec3::new(0.5, 0.0, 0.0)) {
+            return;
+        }
+        assert_eq!(weld_edges(&mut faces, tol), 1, "the missing corner has to cut the neighbour's edge, and only that one");
+
+        let once = Solid::from_faces(faces.clone()).unwrap_or_default();
+        match once.validate() {
+            Ok(()) => {}
+            Err(e) => panic!("the welded cube is closed: {e}"),
+        }
+        assert_eq!(once.edges().map(|e| e.len()), Some(13), "a cube has twelve edges, and the one that was cut became two");
+        assert!((once.volume() - b.volume()).abs() < 1e-12, "cutting an edge in two moved volume: {} -> {}", b.volume(), once.volume());
+        assert!((once.area() - b.area()).abs() < 1e-12, "cutting an edge in two moved area: {} -> {}", b.area(), once.area());
+
+        // And again: nothing to split, and not one loop touched.
+        let loops: Vec<Vec<Vec2>> = faces.iter().flat_map(|f| f.region.loops().cloned()).collect();
+        assert_eq!(weld_edges(&mut faces, tol), 0, "a welded shell has nothing left to split");
+        assert_eq!(loops, faces.iter().flat_map(|f| f.region.loops().cloned()).collect::<Vec<Vec<Vec2>>>(), "the second pass moved a corner");
+        let twice = Solid::from_faces(faces).unwrap_or_default();
+        assert!((twice.volume() - once.volume()).abs() < 1e-12, "the second pass moved volume: {} -> {}", once.volume(), twice.volume());
+        assert!((twice.area() - once.area()).abs() < 1e-12, "the second pass moved area: {} -> {}", once.area(), twice.area());
+    }
 }
 
 /// A closed shell of planar faces.
@@ -699,13 +942,18 @@ impl Solid {
     ///
     /// Returns `None` when some edge is not shared by exactly two faces — an open shell has no
     /// well-defined edge list, and saying so is better than handing back a partial one.
+    ///
+    /// The ends of an edge are identified by `WeldGrid`'s corner numbers, not by a rounded cell
+    /// index: a face and its neighbour hold the same corner as two numbers a unit in the last place
+    /// apart, and two such numbers belong to the same corner whatever cells they fall in.
     pub fn edges(&self) -> Option<Vec<Edge>> {
         let tol = self.tolerance();
         let bb = self.bounds();
-        let mut usage: std::collections::HashMap<((i64, i64, i64), (i64, i64, i64)), Vec<(usize, Vec3, Vec3)>> = std::collections::HashMap::new();
+        let mut grid = WeldGrid::new(tol, bb.min);
+        let mut usage: std::collections::HashMap<(usize, usize), Vec<(usize, Vec3, Vec3)>> = std::collections::HashMap::new();
         for (fi, f) in self.faces.iter().enumerate() {
             for (a, b) in f.edges() {
-                let (ka, kb) = (vkey(a, bb.min, tol), vkey(b, bb.min, tol));
+                let (ka, kb) = (grid.index_of(a), grid.index_of(b));
                 let key = if ka <= kb { (ka, kb) } else { (kb, ka) };
                 usage.entry(key).or_default().push((fi, a, b));
             }
@@ -765,12 +1013,15 @@ impl Solid {
         //
         // A `BTreeMap`, not a `HashMap`: the report is the *first* offending edge in iteration
         // order, and hash order changes from run to run. A kernel that names a different broken
-        // edge each time it is asked is one nobody can debug.
-        let mut usage: std::collections::BTreeMap<((i64, i64, i64), (i64, i64, i64)), Vec<(usize, bool, Vec3, Vec3)>> =
-            std::collections::BTreeMap::new();
+        // edge each time it is asked is one nobody can debug. The key is a pair of `WeldGrid` corner
+        // numbers, so iteration order is the shell's own face-and-edge order — equally fixed from
+        // run to run, and with no cell boundary in it for two copies of one corner to disagree
+        // about.
+        let mut grid = WeldGrid::new(tol, bb.min);
+        let mut usage: std::collections::BTreeMap<(usize, usize), Vec<(usize, bool, Vec3, Vec3)>> = std::collections::BTreeMap::new();
         for (fi, f) in self.faces.iter().enumerate() {
             for (a, b) in f.edges() {
-                let (ka, kb) = (vkey(a, bb.min, tol), vkey(b, bb.min, tol));
+                let (ka, kb) = (grid.index_of(a), grid.index_of(b));
                 let forward = ka <= kb;
                 let key = if forward { (ka, kb) } else { (kb, ka) };
                 usage.entry(key).or_default().push((fi, forward, a, b));
@@ -815,11 +1066,13 @@ impl Solid {
         let bb = self.bounds();
         // vertex -> the faces touching it, with a representative position for the fan check.
         // Ordered, for the same reason `validate` is: the report names one vertex, and it must be
-        // the same one every time.
-        let mut fans: std::collections::BTreeMap<(i64, i64, i64), (Vec3, Vec<usize>)> = std::collections::BTreeMap::new();
+        // the same one every time. `WeldGrid` corner numbers, so the faces around a vertex land on
+        // the same fan however far apart two copies of that vertex ended up.
+        let mut grid = WeldGrid::new(tol, bb.min);
+        let mut fans: std::collections::BTreeMap<usize, (Vec3, Vec<usize>)> = std::collections::BTreeMap::new();
         for (fi, f) in self.faces.iter().enumerate() {
             for v in f.vertices() {
-                fans.entry(vkey(v, bb.min, tol)).or_insert((v, Vec::new())).1.push(fi);
+                fans.entry(grid.index_of(v)).or_insert((v, Vec::new())).1.push(fi);
             }
         }
         for (key, (v, faces)) in fans {
@@ -832,8 +1085,8 @@ impl Solid {
             if unique.len() < 2 {
                 continue;
             }
-            if !fan_is_one_cycle(&self.faces, &unique, v, tol) {
-                return Err(SolidError::Invalid(format!("vertex {key:?} has a pinched fan of {} faces", unique.len())));
+            if !fan_is_one_cycle(&self.faces, &unique, v, tol, &mut grid) {
+                return Err(SolidError::Invalid(format!("vertex {key} has a pinched fan of {} faces", unique.len())));
             }
         }
         Ok(())
@@ -968,7 +1221,25 @@ pub fn reverse_regions(region: &Regions) -> Regions {
     Regions::new(region.iter().map(|r| Region { outer: flip(&r.outer), holes: r.holes.iter().map(|h| flip(h)).collect() }).collect())
 }
 
-/// Vertex key for welding on a tolerance grid.
+/// A pure vertex key: `(p - origin)` quantised on a `tol` grid, nearest cell.
+///
+/// # It is a pure key, and that is all it is
+///
+/// Two points get the same key when they round into the same cell, which is *not* the same as
+/// being the same vertex. The cell boundary sits half a cell inside each cell, so two points
+/// within `tol` of each other land either side of it as often as not, and a key built this way
+/// decides "is this one point?" by asking a question whose answer changes with the drawing's
+/// alignment. Nothing can be done about it inside this function — it returns one triple, so the
+/// boundary is in the answer by construction — and no caller should read a key as an identity.
+///
+/// It is kept, and kept cheap, for the callers that want a *bucket*: grouping, not deciding.
+/// Anything in the kernel that decides whether two points are one vertex asks `WeldGrid` instead,
+/// which clusters by distance over the corners and so has no boundary to fall on. `step.rs`'s
+/// welding is such a caller: it groups exported points into a shell's vertices and the group is
+/// then carried through `Solid::validate`, which resolves identity itself.
+///
+/// Input-derived and therefore hostile: a non-finite coordinate or a degenerate tolerance gives a
+/// saturating or zero index rather than a panic.
 pub(crate) fn vkey(p: Vec3, origin: Vec3, tol: f64) -> (i64, i64, i64) {
     let d = tol.max(1e-300);
     (((p.x - origin.x) / d).round() as i64, ((p.y - origin.y) / d).round() as i64, ((p.z - origin.z) / d).round() as i64)
@@ -979,7 +1250,11 @@ pub(crate) fn vkey(p: Vec3, origin: Vec3, tol: f64) -> (i64, i64, i64) {
 /// Around a well-formed vertex every face contributes exactly two boundary edges, and those
 /// edges chain into one closed ring. Two separate rings mean the shell touches itself at that
 /// vertex: every edge check still passes, so this is the check that catches a pinch.
-fn fan_is_one_cycle(faces: &[Face], fan: &[usize], v: Vec3, tol: f64) -> bool {
+///
+/// The ring is walked on `WeldGrid` corner numbers, the same identity `validate` uses, so an end
+/// shared by two faces is recognised as shared however the two copies of it came to differ in
+/// their last bit.
+fn fan_is_one_cycle(faces: &[Face], fan: &[usize], v: Vec3, tol: f64, grid: &mut WeldGrid) -> bool {
     let mut links: Vec<(Vec3, Vec3)> = Vec::new();
     for &fi in fan {
         let Some(f) = faces.get(fi) else { continue };
@@ -1002,12 +1277,12 @@ fn fan_is_one_cycle(faces: &[Face], fan: &[usize], v: Vec3, tol: f64) -> bool {
         return true;
     }
     // Every welded endpoint appears exactly twice, and all of them belong to one ring.
-    let mut degree: std::collections::HashMap<(i64, i64, i64), usize> = std::collections::HashMap::new();
+    let mut degree: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
     let mut parent: Vec<usize> = (0..links.len() * 2).collect();
-    let mut seen: std::collections::HashMap<(i64, i64, i64), usize> = std::collections::HashMap::new();
+    let mut seen: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
     for (li, (a, b)) in links.iter().enumerate() {
         for (p, side) in [(*a, 0usize), (*b, 1usize)] {
-            let key = vkey(p, v, tol);
+            let key = grid.index_of(p);
             *degree.entry(key).or_default() += 1;
             let id = li * 2 + side;
             if let Some(prev) = seen.insert(key, id) {

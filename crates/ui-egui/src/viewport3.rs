@@ -45,18 +45,33 @@ const FRAME_ID: &str = "cadcraft_viewport3_frame";
 /// The smallest the panel will draw, so a collapsed dock still shows something.
 const MIN_PANEL: egui::Vec2 = egui::Vec2::new(160.0, 120.0);
 
+/// The box each view button is placed in, in points.
+const BUTTON: egui::Vec2 = egui::Vec2::new(56.0, 22.0);
+
+/// How far the view buttons keep from the picture's right edge, and from each other.
+const BUTTON_GAP: f32 = 6.0;
+
 /// A rasterised picture and the identity the host gives it.
 ///
 /// `revision` is the host's word for "this is a different picture": bump it whenever the camera or
 /// the model changed and produced new pixels. The panel uses it to decide whether to upload, and
 /// uploads once per revision rather than once per frame — a per-frame upload of a 900 × 700 RGBA
 /// buffer asks the GPU to re-take 2.5 MB forty times a second for a picture that did not change.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Frame {
     /// Bumped by the host whenever `image` is a different picture.
     pub revision: u64,
     /// The picture, as [`cadcraft_render::scene3::render`] wrote it: RGBA8, row 0 at the top.
     pub image: Image,
+}
+
+impl Default for Frame {
+    /// No picture at all: revision zero and a zero-sized image. [`cadcraft_render::scene3::Image`]
+    /// has no `Default` of its own — an image is always something the renderer wrote — so the
+    /// empty frame is built here, and [`Frame::is_empty`] is what reports it.
+    fn default() -> Frame {
+        Frame { revision: 0, image: Image { width: 0, height: 0, data: Vec::new() } }
+    }
 }
 
 impl Frame {
@@ -103,7 +118,7 @@ impl ViewportDelta {
 pub fn show(ui: &mut egui::Ui, scene: &Scene, frame: &Frame, state: &mut ViewportState) -> (egui::Response, ViewportDelta) {
     let t = Tokens::get();
     let size = ui.available_size().max(MIN_PANEL);
-    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
 
     // A click takes the keyboard, and the keyboard is only ours while we have it.
     let wants_keys = response.clicked() || ui.memory(|m| m.has_focus(response.id));
@@ -116,14 +131,14 @@ pub fn show(ui: &mut egui::Ui, scene: &Scene, frame: &Frame, state: &mut Viewpor
         let p = ui.painter_at(rect);
         p.rect_filled(rect, 0.0, t.canvas);
         if let Some(texture) = texture(ui.ctx(), frame) {
-            p.image(texture.id(), rect, egui::Color32::WHITE);
+            p.image(texture.id(), rect, whole_texture(), egui::Color32::WHITE);
         }
         p.rect_stroke(rect, 0.0, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
     }
 
     // The view buttons, over the picture.
     buttons(ui, rect, &mut gesture);
-    let panning = response.middle_down() || response.secondary_down();
+    let panning = is_panning(&response);
 
     // Fold the input in. The picture is already drawn, so the frame lags the camera by one.
     let per_pixel = state.world_per_pixel(f64::from(rect.height()));
@@ -151,17 +166,26 @@ pub fn show(ui: &mut egui::Ui, scene: &Scene, frame: &Frame, state: &mut Viewpor
     (response.on_hover_cursor(cursor), ViewportDelta { camera_changed, pick_requested })
 }
 
+/// Whether a drag on the panel is a pan rather than an orbit: the middle or the right button is
+/// the one dragging. egui answers that per button through
+/// [`egui::Response::dragged_by`], so a pan is only claimed once the pointer has actually moved —
+/// which is exactly when a drag is a drag and not a click.
+fn is_panning(response: &egui::Response) -> bool {
+    response.dragged_by(egui::PointerButton::Middle) || response.dragged_by(egui::PointerButton::Secondary)
+}
+
 /// This frame's input, in the camera's own units.
 fn gesture_of(ui: &egui::Ui, response: &egui::Response, wants_keys: bool) -> Gesture {
     let mut gesture = Gesture::default();
     if response.dragged() {
         let d = response.drag_delta();
         gesture.drag = Vec2::new(f64::from(d.x), f64::from(d.y));
-        gesture.panning = response.middle_down() || response.secondary_down();
+        gesture.panning = is_panning(response);
     }
     // The wheel belongs to the panel whenever the pointer is over it, focused or not: a person
-    // scrolls over the thing they are looking at.
-    let wheel = ui.input(|i| i.zoom_delta());
+    // scrolls over the thing they are looking at. A wheel anywhere else in the panel belongs to
+    // whatever is under the pointer there.
+    let wheel = if response.hovered() { ui.input(|i| i.zoom_delta()) } else { 0.0 };
     gesture.wheel = if wheel.is_finite() { f64::from(wheel) } else { 0.0 };
     if wants_keys {
         use egui::Key;
@@ -216,23 +240,36 @@ fn cursor_of(response: &egui::Response, panning: bool) -> egui::CursorIcon {
 }
 
 /// The `Home` and `Fit` buttons, over the top right of the picture.
+///
+/// **Placed, not laid out.** [`egui::Ui::place`] puts each button in a rectangle this file chooses,
+/// so the two of them sit over the picture without asking egui for any layout space — a viewport
+/// panel has none to give. The rectangles are fixed-size, which is why a translated button is wider
+/// than its box: the button sizes itself to its text and the box only says where it starts.
 fn buttons(ui: &mut egui::Ui, rect: egui::Rect, gesture: &mut Gesture) {
-    ui.allocate_ui_at_rect(rect, |ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-            if ui.small_button(crate::tl!("Home")).on_hover_text(crate::tl!("Standard view")).clicked() {
-                gesture.home = true;
-            }
-            if ui.small_button(crate::tl!("Fit")).on_hover_text(crate::tl!("Frame the model")).clicked() {
-                gesture.frame = true;
-            }
-        });
-    });
+    let margin = rect.left() + BUTTON_GAP;
+    let right = (rect.right() - BUTTON_GAP - BUTTON.x).max(margin);
+    let left = (right - BUTTON.x - BUTTON_GAP).max(margin);
+    let top = rect.top() + BUTTON_GAP;
+
+    let home = ui.place(egui::Rect::from_min_size(egui::pos2(right, top), BUTTON), egui::Button::new(crate::tl!("Home")));
+    if home.on_hover_text(crate::tl!("Standard view")).clicked() {
+        gesture.home = true;
+    }
+    let fit = ui.place(egui::Rect::from_min_size(egui::pos2(left, top), BUTTON), egui::Button::new(crate::tl!("Fit")));
+    if fit.on_hover_text(crate::tl!("Frame the model")).clicked() {
+        gesture.frame = true;
+    }
 }
 
 /// What the panel says when there is no body to look at.
 fn hint(ui: &egui::Ui, rect: egui::Rect, text: &str) {
     let t = Tokens::get();
     ui.painter_at(rect).text(rect.center(), egui::Align2::CENTER_CENTER, text.to_owned(), crate::theme::body(), t.text_faint);
+}
+
+/// The uv rectangle a whole texture is drawn from: the unit square, `0..1` on both axes.
+fn whole_texture() -> egui::Rect {
+    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
 }
 
 /// The uploaded picture, kept in egui memory.
@@ -334,6 +371,10 @@ mod tests {
     }
 
     fn wheel(h: &mut Harness<'static, Fixture>, notches: f32) {
+        // The panel takes the wheel only while the pointer is over the picture, which is where a
+        // person scrolls anyway — so put it there first, as a person would have.
+        let at = rect(h).center();
+        h.event(Event::PointerMoved(at));
         h.event(Event::MouseWheel {
             unit: egui::MouseWheelUnit::Line,
             delta: vec2(0.0, notches),
@@ -432,6 +473,24 @@ mod tests {
         assert!(c.distance <= crate::viewport_state::MAX_DISTANCE, "distance {}", c.distance);
         assert!(c.eye().dist(c.target) > 0.0);
         assert!(c.camera().is_valid(), "{c:?}");
+    }
+
+    #[test]
+    fn a_wheel_away_from_the_picture_is_not_the_viewports() {
+        let mut h = harness();
+        let start = h.state().state.camera;
+        // The pointer leaves the picture, so the notch belongs to whatever is under it there.
+        let r = rect(&h);
+        h.event(Event::PointerMoved(egui::pos2(r.right() + 4.0, r.bottom() + 4.0)));
+        h.event(Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: vec2(0.0, 1.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::default(),
+        });
+        h.run_steps(2);
+        assert_eq!(h.state().state.camera, start, "a wheel outside the picture moved the camera");
+        assert!(h.state().delta.is_empty(), "{:?}", h.state().delta);
     }
 
     #[test]

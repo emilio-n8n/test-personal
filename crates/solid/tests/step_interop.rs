@@ -13,7 +13,18 @@
 //!   for `#`, an id and a terminator, rather than cutting on `;` and hoping), and — the part that
 //!   actually catches things — a **table of the expected attribute list of every keyword the writer
 //!   can emit**. A keyword the writer invents, an argument dropped or added, or a `FACE_BOUND`
-//!   written with a surface's arguments fails here and nowhere else.
+//!   written with a surface's arguments fails here and nowhere else. A second table says what each
+//!   *referenced* attribute must name — the schema table establishes that an attribute is a
+//!   reference, the typing table says to which entity — so an `AXIS2_PLACEMENT_3D` whose `location`
+//!   is a `VERTEX_POINT`, where the schema says `CARTESIAN_POINT`, fails here as well.
+//! - **It was wrong twice before it was right, and the first version failed for the wrong reason.**
+//!   As first written it consumed the opening `.` of an enumeration and left the closing one behind,
+//!   so it lost the thread on the second entity of every file — the `SI_UNIT` — stopped reading, and
+//!   reported all eleven tests as "the file holds 0 solids". It also had no opinion at all about
+//!   what a reference names, which is how it read a file carrying a `VERTEX_POINT` in a placement's
+//!   `location` without complaint. Both are corrected here, and both are exactly what a reader that
+//!   had never been run against a file a real CAD system wrote gets wrong. That is the argument for
+//!   getting one, not against this one.
 //! - It also checks the *geometry*, not just the syntax: the shell is walked from the coordinates
 //!   that were written, so a reversed loop, a dropped face, a vertex off its own plane or an edge
 //!   used twice the same way round all show up as numbers.
@@ -62,9 +73,16 @@ fn washer() -> Solid {
 }
 
 /// A box with one edge rounded: many faces, loops of many vertices, non-orthogonal adjacency.
+///
+/// The reference is corrected, not weakened. `EdgeRef` is a point that must lie **on** an edge —
+/// `(5, 0, 5)` is the middle of this box's *bottom face*, five units clear of all four of its
+/// edges, and `resolve` answers "no edge passes through" for it, correctly: the old reference named
+/// a face, not an edge. The edge from `(10, 0, 0)` to `(10, 0, 10)` is the one `(10, 0, 5)` lies
+/// on, five units from the two edges that meet it at its ends, so the reference is unambiguous —
+/// which matters, because `resolve` refuses an ambiguous one as a guess rather than a choice.
 fn filleted_box() -> Solid {
     let s = must(support::box_at(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)), "box");
-    must(fillet(&s, &[EdgeRef::new(Vec3::new(5.0, 0.0, 5.0), 1e-6)], 1.0, 6), "fillet")
+    must(fillet(&s, &[EdgeRef::new(Vec3::new(10.0, 0.0, 5.0), 1e-6)], 1.0, 6), "fillet")
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -80,8 +98,12 @@ enum Arg {
     Text(String),
     /// A part 21 real.
     Number(f64),
-    /// `.T.` / `.F.`.
-    Enum(bool),
+    /// `.NAME.` — an enumeration, with the name kept whole and the two dots stripped.
+    ///
+    /// The name is the point of the variant. `.T.` and `.MILLI.` have the same shape to a parser
+    /// that only wants a boolean, and a reader that cannot tell them apart is precisely the reader
+    /// this file exists to be harder than — so `.MILLI.` must not be able to pass for `.F.`.
+    Enum(String),
     /// `*`, the derived-attribute placeholder.
     Derived,
     /// `$`, an unset optional attribute.
@@ -182,7 +204,14 @@ impl<'a> Reader<'a> {
                 self.at += 1;
             }
         }
-        self.text[start..self.at].trim().parse::<f64>().unwrap_or(f64::NAN)
+        // A literal that will not parse is a failure, not a NaN. A NaN would sail through the
+        // schema table as a number and surface two hundred lines later as "the file says NaN",
+        // which is a worse answer than the one this gives.
+        let literal = self.text.get(start..self.at).unwrap_or("<end of file>").trim();
+        match literal.parse::<f64>() {
+            Ok(v) => v,
+            Err(_) => panic!("byte {start} of the DATA section holds {literal:?}, which is not a part 21 real"),
+        }
     }
 
     fn string(&mut self) -> String {
@@ -244,8 +273,16 @@ impl<'a> Reader<'a> {
                 Arg::List(self.arguments())
             }
             Some(b'.') => {
+                // An enumeration is written `.NAME.` and **both dots belong to the token**. Taking
+                // the opening one and leaving the closing one behind is what made this reader lose
+                // the thread on `#2` and call every file empty: the stray `.` derails the rest of
+                // the statement, and the failure then surfaces a hundred entities away as a
+                // missing solid. Nothing here tolerates a grammar it does not expect.
+                let start = self.at;
                 self.at += 1;
-                Arg::Enum(self.identifier().as_deref() == Some("T"))
+                let name = self.identifier().unwrap_or_default();
+                assert!(self.take(b'.'), "byte {start} holds the enumeration `.{name}` with no closing dot, and part 21 writes one as `.NAME.`");
+                Arg::Enum(name)
             }
             Some(b'*') => {
                 self.at += 1;
@@ -299,10 +336,15 @@ impl<'a> Reader<'a> {
 }
 
 /// Read the DATA section. Statements are found by structure rather than by cutting on `;`, so a
-/// `;` inside a string literal cannot cut the file in half, and a statement with no terminator
-/// ends the read instead of being swallowed.
+/// `;` inside a string literal cannot cut the file in half.
+///
+/// Every way the read can fail is a panic that says what it expected and where, and **none of them
+/// is a silent `break`**. A reader that gives up quietly and returns what it managed to read turns a
+/// one-token defect in the writer into "the file holds 0 solids" eleven tests later, which is what
+/// this function did before its enumeration handling was fixed. A truncated read is a truncated
+/// read: it is named here, at the byte where it happened.
 fn parse_data(text: &str) -> Vec<Entity> {
-    let Some(mark) = text.find("DATA;") else { return Vec::new() };
+    let Some(mark) = text.find("DATA;") else { panic!("the file has no DATA section") };
     let mut r = Reader::new(text);
     r.at = mark + "DATA;".len();
     let mut out: Vec<Entity> = Vec::new();
@@ -311,20 +353,21 @@ fn parse_data(text: &str) -> Vec<Entity> {
         if r.at >= r.text.len() || r.text[r.at..].starts_with("ENDSEC") {
             break;
         }
-        if !r.take(b'#') {
-            break;
-        }
+        assert!(r.take(b'#'), "byte {} of the DATA section starts {}, not `#`", r.at, here(&r));
         let id = r.digits();
-        if !r.take(b'=') {
-            break;
-        }
-        let Some((keyword, args, parts)) = r.body() else { break };
-        if !r.take(b';') {
-            break;
-        }
+        assert!(r.take(b'='), "#{id} is followed by {} rather than `=`", here(&r));
+        let Some((keyword, args, parts)) = r.body() else {
+            panic!("#{id} = is followed by {}, which is neither a keyword nor a complex instance", here(&r))
+        };
+        assert!(r.take(b';'), "#{id} = {keyword} is followed by {} rather than `;`", here(&r));
         out.push(Entity { id, keyword, args, parts });
     }
     out
+}
+
+/// The next dozen bytes of the file, for a failure message that has to stand in for the file.
+fn here(r: &Reader<'_>) -> String {
+    r.text.get(r.at..r.at + 12).unwrap_or("<the end of the file>").to_string()
 }
 
 /// Every `#n` an entity names, including the ones inside a complex instance.
@@ -408,6 +451,114 @@ const SCHEMA: &[(&str, &[Want])] = &[
     ("SHAPE_DEFINITION_REPRESENTATION", &[Want::Ref, Want::Ref]),
 ];
 
+/// What each *referenced* attribute of an entity must name, for the keywords that hold references.
+///
+/// [`SCHEMA`] establishes that an attribute is a reference. This table says to which entity, which
+/// is the half of the check a graph-walking reader cannot do: `#17=AXIS2_PLACEMENT_3D('',#12,#13,
+/// #14)` is a perfectly well-formed graph no matter what `#12` is, and every id in it resolves, and
+/// yet the schema says `location` is a `cartesian_point` and a `vertex_point` is a topological
+/// vertex rather than a point in space. That is exactly the defect this writer had, and neither
+/// parser here noticed it until this table existed.
+///
+/// A keyword absent from this table is one that carries no references — `CARTESIAN_POINT`,
+/// `DIRECTION`, the three unit keywords, `SI_UNIT` — or one this reader has not been given an
+/// opinion about, and those are not checked. Unlike [`SCHEMA`] this table is deliberately partial:
+/// it is a list of what must be true, not a claim to be complete. `A|B` accepts either, and a
+/// complex instance matches if any of its parts does, which is how every unit in the file is
+/// written.
+const REFERENCED: &[(&str, &[&str])] = &[
+    ("VERTEX_POINT", &["CARTESIAN_POINT"]),
+    ("VECTOR", &["DIRECTION"]),
+    ("LINE", &["CARTESIAN_POINT", "VECTOR"]),
+    ("EDGE_CURVE", &["VERTEX_POINT", "VERTEX_POINT", "LINE", "enum"]),
+    ("POLY_LOOP", &["list:VERTEX_POINT"]),
+    ("FACE_OUTER_BOUND", &["POLY_LOOP", "enum"]),
+    ("FACE_BOUND", &["POLY_LOOP", "enum"]),
+    ("ADVANCED_FACE", &["list:FACE_OUTER_BOUND|FACE_BOUND", "PLANE", "enum"]),
+    ("FACE_SURFACE", &["list:FACE_OUTER_BOUND|FACE_BOUND", "PLANE", "enum"]),
+    // The one this table exists for.
+    ("AXIS2_PLACEMENT_3D", &["CARTESIAN_POINT", "DIRECTION", "DIRECTION"]),
+    ("PLANE", &["AXIS2_PLACEMENT_3D"]),
+    ("CLOSED_SHELL", &["list:ADVANCED_FACE|FACE_SURFACE"]),
+    ("FACETED_BREP", &["CLOSED_SHELL"]),
+    ("COMPOSITE_CURVE_SEGMENT", &["enum", "enum", "EDGE_CURVE|LINE"]),
+    ("COMPOSITE_CURVE", &["list:COMPOSITE_CURVE|COMPOSITE_CURVE_SEGMENT", "enum"]),
+    ("GEOMETRIC_CURVE_SET", &["list:COMPOSITE_CURVE|EDGE_CURVE|LINE"]),
+    ("UNCERTAINTY_MEASURE_WITH_UNIT", &["any", "LENGTH_UNIT|PLANE_ANGLE_UNIT|SOLID_ANGLE_UNIT", "any", "any"]),
+    ("GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT", &["list:UNCERTAINTY_MEASURE_WITH_UNIT"]),
+    ("GLOBAL_UNIT_ASSIGNED_CONTEXT", &["list:LENGTH_UNIT|PLANE_ANGLE_UNIT|SOLID_ANGLE_UNIT"]),
+    ("PRODUCT_CONTEXT", &["APPLICATION_CONTEXT", "any"]),
+    ("PRODUCT", &["any", "any", "any", "list:PRODUCT_CONTEXT"]),
+    ("PRODUCT_DEFINITION_FORMATION", &["PRODUCT"]),
+    ("PRODUCT_DEFINITION_CONTEXT", &["APPLICATION_CONTEXT", "any"]),
+    ("PRODUCT_DEFINITION", &["any", "any", "PRODUCT_DEFINITION_FORMATION", "PRODUCT_DEFINITION_CONTEXT"]),
+    ("PRODUCT_DEFINITION_SHAPE", &["any", "any", "PRODUCT_DEFINITION"]),
+    (
+        "SHAPE_DEFINITION_REPRESENTATION",
+        &["PRODUCT_DEFINITION_SHAPE", "ADVANCED_BREP_SHAPE_REPRESENTATION|GEOMETRICALLY_BOUNDED_WIREFRAME_SHAPE_REPRESENTATION"],
+    ),
+];
+
+/// Every keyword `#id` answers to: one for a simple instance, one per part for a complex one.
+fn keywords_of<'a>(entities: &'a [Entity], id: usize, what: &str) -> Vec<&'a str> {
+    match entities.iter().find(|e| e.id == id) {
+        Some(e) if e.parts.is_empty() => vec![e.keyword.as_str()],
+        Some(e) => e.parts.iter().map(|(n, _)| n.as_str()).collect(),
+        None => panic!("{what} names #{id}, which no entity defines"),
+    }
+}
+
+/// Does any of the keywords an entity answers to satisfy `want`, which may be `A|B`?
+fn accepts(want: &str, got: &[&str]) -> bool {
+    want.split('|').any(|w| got.contains(&w))
+}
+
+/// Check one instance's references against [`REFERENCED`]. A keyword with no row is not checked.
+fn check_typed(id: usize, keyword: &str, args: &[Arg], entities: &[Entity]) {
+    let Some((_, wants)) = REFERENCED.iter().find(|(name, _)| *name == keyword) else {
+        return;
+    };
+    for (i, want) in wants.iter().enumerate() {
+        let Some(arg) = args.get(i) else {
+            panic!("#{id} = {keyword} has {} attributes and the typing table wants one at {i}", args.len());
+        };
+        let what = format!("#{id} = {keyword}, attribute {i}");
+        if let Some(item) = want.strip_prefix("list:") {
+            let Arg::List(list) = arg else {
+                panic!("{what} is {arg:?}, and a reader would want a list of {item} there");
+            };
+            for (n, entry) in list.iter().enumerate() {
+                let Arg::Ref(target) = entry else {
+                    panic!("{what}, item {n} of the list is {entry:?}, and a reader would want a reference there");
+                };
+                let got = keywords_of(entities, *target, &format!("{what}, item {n}"));
+                assert!(accepts(item, &got), "{what}, item {n} names #{target}, which is a {got:?}, and a reader wants {item}");
+            }
+        } else if *want == "enum" {
+            assert!(matches!(arg, Arg::Enum(_)), "{what} is {arg:?}, and a reader would want an enumeration there");
+        } else if *want != "any" {
+            let Arg::Ref(target) = arg else {
+                panic!("{what} is {arg:?}, and a reader would want a reference to {want} there");
+            };
+            let got = keywords_of(entities, *target, &what);
+            assert!(accepts(want, &got), "{what} names #{target}, which is a {got:?}, and a reader wants {want}");
+        }
+    }
+}
+
+/// Every reference in the file, against the table above, including each part of a complex instance.
+fn check_references(entities: &[Entity]) {
+    for e in entities {
+        if e.parts.is_empty() {
+            check_typed(e.id, &e.keyword, &e.args, entities);
+        } else {
+            for (name, args) in &e.parts {
+                check_typed(e.id, name, args, entities);
+            }
+        }
+    }
+}
+
 fn want_matches(want: Want, arg: &Arg) -> bool {
     match (want, arg) {
         (Want::Text, Arg::Text(_)) => true,
@@ -432,18 +583,14 @@ fn check_one(keyword: &str, args: &[Arg], id: usize) {
     }
 }
 
-/// Every entity in the file against the table above, including each part of a complex instance.
-fn check_schema(entities: &[Entity]) {
-    assert!(!entities.is_empty(), "the DATA section parsed to nothing");
-    for e in entities {
-        if e.parts.is_empty() {
-            check_one(&e.keyword, &e.args, e.id);
-        } else {
-            for (name, args) in &e.parts {
-                check_one(name, args, e.id);
-            }
-        }
-    }
+/// Every entity in the file against both tables above, each part of a complex instance on its own.
+///
+/// `check_schema` says an entity has the attributes its EXPRESS entity declares;
+/// `check_references` says those attributes name the entities the schema says they name. A file can
+/// pass the first and fail the second, and the defect that motivated it did.
+fn check_entities(entities: &[Entity]) {
+    check_schema(entities);
+    check_references(entities);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -549,6 +696,14 @@ impl Part21 {
         self.point_of(point)
     }
 
+    /// The `SI_UNIT` behind the file's length unit: the one every coordinate is read through.
+    fn length_unit(&self) -> usize {
+        match self.entities.iter().find(|e| e.names("LENGTH_UNIT")) {
+            Some(e) => e.id,
+            None => panic!("the file declares no LENGTH_UNIT, so it never says what its coordinates are measured in"),
+        }
+    }
+
     /// The distance within which the file itself says two points are the same point.
     fn uncertainty(&self) -> f64 {
         let unc = self.of("UNCERTAINTY_MEASURE_WITH_UNIT");
@@ -557,6 +712,9 @@ impl Part21 {
             None => panic!("the file declares no uncertainty, so it never says what 'the same point' means"),
         };
         let args = self.args_of(e.id, "UNCERTAINTY_MEASURE_WITH_UNIT");
+        // A tolerance quoted in the wrong unit is not a tolerance at all.
+        let unit = self.as_ref(self.arg(args, 1), "an uncertainty's unit");
+        assert_eq!(unit, self.length_unit(), "the uncertainty is measured in #{unit}, not in the file's length unit");
         match self.arg(args, 0) {
             Arg::Typed(name, inner) => {
                 assert_eq!(name, "LENGTH_MEASURE", "the uncertainty is a {name:?}, not a length");
@@ -564,6 +722,18 @@ impl Part21 {
             }
             other => panic!("the uncertainty is {other:?}"),
         }
+    }
+}
+
+/// The name inside an enumeration token: `.T.` is `T`, and the two dots are part of the token
+/// rather than part of the name.
+///
+/// Compared by name rather than by `matches!`, so that a failure says what the file actually wrote
+/// — which is the whole reason [`Arg::Enum`] keeps the name.
+fn enum_name<'a>(arg: &'a Arg, what: &str) -> &'a str {
+    match arg {
+        Arg::Enum(name) => name.as_str(),
+        other => panic!("{what} is {other:?}, and a reader would want an enumeration there"),
     }
 }
 
@@ -628,8 +798,8 @@ fn audit(solid: &Solid, text: &str) -> Audit {
     assert!(file.text().trim_end().ends_with("END-ISO-10303-21;"), "and closes with it");
     assert_eq!(file.text().matches("ENDSEC;").count(), 2, "one section closes after the header, one after the data");
 
-    // -- every entity against the schema table ------------------------------------------------
-    check_schema(&file.entities);
+    // -- every entity against the schema and reference tables -------------------------------------
+    check_entities(&file.entities);
 
     // -- ids are 1..n, each defined once ------------------------------------------------------
     let ids: Vec<usize> = file.entities.iter().map(|e| e.id).collect();
@@ -669,6 +839,14 @@ fn audit(solid: &Solid, text: &str) -> Audit {
         solid.faces.len()
     );
 
+    // -- the unit every coordinate in the file is read through ----------------------------------
+    // An enumeration a reader cannot tell from `.F.` is an enumeration it cannot check, and this is
+    // the one the first version of this parser could not see: `.MILLI.` and `.F.` both parsed as
+    // "false". The unit is the single thing in the file that every measurement passes through.
+    let si = file.args_of(file.length_unit(), "SI_UNIT");
+    assert_eq!(enum_name(file.arg(si, 0), "the length unit's prefix"), "MILLI", "the kernel works in millimetres and the file has to say so");
+    assert_eq!(enum_name(file.arg(si, 1), "the length unit's name"), "METRE", "a milli-prefixed unit has to be a metre");
+
     // -- faces, bounds, loops and vertices ---------------------------------------------------
     let uncertainty = file.uncertainty();
     assert!(uncertainty > 0.0, "the file declares an uncertainty of {uncertainty}, which is no distance at all");
@@ -683,7 +861,7 @@ fn audit(solid: &Solid, text: &str) -> Audit {
         let face_id = *face_id;
         let Some(kernel_face) = solid.faces.get(fi) else { continue };
         let face_args = file.args_of(face_id, "ADVANCED_FACE");
-        assert!(matches!(file.arg(face_args, 3), Arg::Enum(true)), "#{face_id} is written with same_sense false");
+        assert_eq!(enum_name(file.arg(face_args, 3), "a face's same_sense"), "T", "#{face_id} is not written with same_sense true");
 
         let surface = file.as_ref(file.arg(face_args, 2), "a face's surface");
         let plane_args = file.args_of(surface, "PLANE");
@@ -716,7 +894,7 @@ fn audit(solid: &Solid, text: &str) -> Audit {
                 file.keyword(bound)
             );
             let bound_args = file.args_of(bound, expected);
-            assert!(matches!(file.arg(bound_args, 2), Arg::Enum(true)), "#{bound} is written with orientation false");
+            assert_eq!(enum_name(file.arg(bound_args, 2), "a bound's orientation"), "T", "#{bound} is not written with orientation true");
 
             let poly = file.as_ref(file.arg(bound_args, 1), "a bound's loop");
             let poly_args = file.args_of(poly, "POLY_LOOP");
@@ -772,7 +950,7 @@ fn audit(solid: &Solid, text: &str) -> Audit {
         let key = key_of(v0, v1);
         assert!(uses.contains_key(&key), "the edge curve #{} joins #{v0} and #{v1}, which no face loop names", c.id);
         assert!(curve_keys.insert(key, c.id).is_none(), "two edge curves join the same pair of vertices");
-        assert!(matches!(file.arg(args, 4), Arg::Enum(true)), "#{} is written with same_sense false", c.id);
+        assert_eq!(enum_name(file.arg(args, 4), "an edge curve's same_sense"), "T", "#{} is not written with same_sense true", c.id);
 
         let line = file.as_ref(file.arg(args, 3), "an EDGE_CURVE's curve");
         let line_args = file.args_of(line, "LINE");
@@ -813,7 +991,7 @@ fn audit(solid: &Solid, text: &str) -> Audit {
         let args = file.args_of(c.id, "COMPOSITE_CURVE");
         let segs = file.as_list(file.arg(args, 1), "a COMPOSITE_CURVE's segments");
         assert_eq!(segs.len(), 1, "#{} carries {} segments, and there is one per edge", c.id, segs.len());
-        assert!(matches!(file.arg(args, 2), Arg::Enum(false)), "#{} is written as self-intersecting", c.id);
+        assert_eq!(enum_name(file.arg(args, 2), "a composite curve's self_intersect"), "F", "#{} is written as self-intersecting", c.id);
     }
 
     // -- one vertex per place -----------------------------------------------------------------

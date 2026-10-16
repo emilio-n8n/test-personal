@@ -22,12 +22,21 @@
 //!   this file can emit, the closure and orientation of the shell read back from the written
 //!   coordinates, and the volume recomputed from those coordinates. It exists so that a bug in
 //!   the first parser cannot hide, and it agrees with the same geometry the mesh writer produces.
+//! - **The second parser had to earn its place, and its first version was itself broken.** Written
+//!   before this revision, it read the opening `.` of an enumeration and not its closing one, so it
+//!   lost the thread on `#2` — the `SI_UNIT` — and reported every file it was handed as holding no
+//!   solids; and it had no opinion whatever about *what* a reference names, so it could not see the
+//!   `VERTEX_POINT` this writer had put where `axis2_placement_3d` names a `cartesian_point`.
+//!   Both are corrected, and the second is now pinned by a reference-typing table in the interop
+//!   test. **Neither correction is evidence about a real reader.**
 //! - Both parsers were written by the same author, from the same reading of the same specification.
 //!   Neither is a conforming STEP implementation: they do not check EXPRESS semantics, they do not
 //!   know about subtypes, inherited attributes or WHERE rules, and they do not build a topology.
 //!   **A file can pass every test here and still be rejected by a real reader.** What is missing is
 //!   one round trip through one independent implementation, and `DAT-003` in the master plan exists
-//!   to get it.
+//!   to get it. **That is as true of this revision as of any other: no OCCT, FreeCAD, SolidWorks,
+//!   CAD Exchanger or `stepcode` has opened a file this writer produced. Finding and fixing two
+//!   defects in our own code is not a round trip.**
 //!
 //! The list below is therefore not a summary of the tests. It is the list of things this file does
 //! that a careful reader has to be told, because nothing about them is obvious from the schema and
@@ -38,12 +47,18 @@
 //! ## A. Deliberate departures from AP214's `faceted_brep` rule
 //!
 //! 1. **`ADVANCED_FACE`, where the rule names `FACE_SURFACE`.** `ADVANCED_FACE` is a `FACE_SURFACE`
-//!    subtype that adds two obligations: every loop vertex must lie on the surface, and every edge
-//!    must carry a curve. Both hold here — every face is planar and every edge is a `LINE` in that
-//!    same plane — and `tests/step_interop.rs` checks both against the coordinates actually written.
-//!    Still, a validator that matches the rule text literally will object. Swapping the keyword
-//!    back to `FACE_SURFACE` is a one-line change, and `FACE_SURFACE` is in the interop test's
-//!    schema table so the file stays checkable either way.
+//!    subtype that adds obligations stated over *edges*: every loop vertex must lie on the surface,
+//!    and every edge must carry a curve. Both hold here — every face is planar and every edge is a
+//!    `LINE` in that same plane — and `tests/step_interop.rs` checks both against the coordinates
+//!    actually written. What does **not** hold is the shape those obligations are phrased in: a
+//!    `POLY_LOOP` (item 3) is a `LOOP` but is not an `EDGE_LOOP`, so a validator that reads
+//!    `ADVANCED_FACE` as demanding `EDGE_LOOP` bounds has nothing in this file it will accept, and
+//!    there is no `ORIENTED_EDGE` anywhere for it to check one with. **This is the largest
+//!    remaining risk in the file and it is an open judgement, not a settled one.** Swapping the
+//!    keyword back to `FACE_SURFACE` removes the question, is a one-line change, and `FACE_SURFACE`
+//!    is in the interop test's schema and reference tables so the file stays checkable either way.
+//!    It has deliberately *not* been swapped: no reader has ever accepted either spelling, so
+//!    choosing blind would be pretending to knowledge nobody in this repository has.
 //! 2. **A second outer loop becomes a `FACE_BOUND`.** A face holding *several disjoint* regions
 //!    writes its extra outer loops as `FACE_BOUND`, because a STEP face's bound list has no way to
 //!    say "a second outer loop". A reader that assumes every `FACE_BOUND` is a hole reads such a
@@ -130,7 +145,13 @@
 //! - [ ] Does the solid's **volume** equal the kernel's, to a relative `1e-9`?
 //! - [ ] Do the faces point **outward** — is the solid selectable and is its volume positive?
 //! - [ ] Is the second shape representation (the edge wireframe) ignored, warned about, or fatal?
-//! - [ ] Does the reader accept **`ADVANCED_FACE`** where `faceted_brep` names `FACE_SURFACE`?
+//! - [ ] Does the reader accept **`ADVANCED_FACE`** where `faceted_brep` names `FACE_SURFACE`,
+//!       and does it accept a `POLY_LOOP` inside one at all? A `POLY_LOOP` is a `LOOP`, not an
+//!       `EDGE_LOOP`, and this file has no `ORIENTED_EDGE` for a validator to check one with. If
+//!       either is refused, `FACE_SURFACE` is a one-line swap and this is the reason to make it.
+//! - [ ] Does it reject an `AXIS2_PLACEMENT_3D` whose `location` is not a `CARTESIAN_POINT`, or
+//!       accept one? This file writes `CARTESIAN_POINT`s there and both test files insist on it, so
+//!       a reader that objects is reading the attribute more strictly than we are.
 //! - [ ] Does it need `APPLICATION_PROTOCOL_DEFINITION` / `MECHANICAL_CONTEXT`?
 //! - [ ] Does it report the unit as **millimetre**, given an empty `LENGTH_UNIT` name?
 //! - [ ] For a face with a hole (a washer): are the **`FACE_BOUND`s read as holes**?
@@ -146,12 +167,15 @@
 //!
 //! Every other property of the output is asserted by this module's tests and by
 //! `tests/step_interop.rs`: the section layout, sequential ids from `#1`, no dangling or forward
-//! reference, exactly two entry points, the entity table of every keyword, the `CLOSED_SHELL` face
-//! count against the solid's own, each face's loop count and vertex count, every boundary edge used
-//! once in each direction, every loop vertex on its own face's plane within the declared
-//! uncertainty, every `LINE` passing through both of its vertices, every edge curve referenced by
-//! exactly one composite segment, the winding of every bound against its own face normal, and the
-//! volume recomputed from the written coordinates. Orientation is preserved rather than re-derived:
+//! reference, exactly two entry points, the entity table of every keyword, **what every referenced
+//! attribute actually names** (an `axis2_placement_3d.location` is a `cartesian_point`, because a
+//! `vertex_point` is a topological vertex and not a point in space — this file was wrong about that
+//! and both test files now pin it), the `CLOSED_SHELL` face count against the solid's own, each
+//! face's loop count and vertex count, every boundary edge used once in each direction, every loop
+//! vertex on its own face's plane within the declared uncertainty, every `LINE` passing through
+//! both of its vertices, every edge curve referenced by exactly one composite segment, the winding
+//! of every bound against its own face normal, and the volume recomputed from the written
+//! coordinates. Orientation is preserved rather than re-derived:
 //! the loops go into the file as the kernel wound them and each face's `PLANE` axis is its own
 //! normal, so a shell that is open or inside-out is written faithfully and uselessly — run
 //! [`Solid::validate`] first.
@@ -237,10 +261,19 @@ pub fn step_faceted_brep(solid: &Solid, name: &str) -> Result<String, SolidError
     // 2. One CARTESIAN_POINT and one VERTEX_POINT per corner of the shell. A reader rejects two
     //    vertices at the same place, so this table is the whole reason a solid with holes in its
     //    faces can be written at all: the corner belongs to the solid, not to a face.
+    //
+    //    The two ids are kept side by side rather than derived. `point_id[i]` is the
+    //    `CARTESIAN_POINT` and `vertex[i]` is the `VERTEX_POINT` standing on it, and the face
+    //    placements below need the first of those: `axis2_placement_3d.location` names a
+    //    `cartesian_point`, and a `vertex_point` is a topological vertex, not a point in space. The
+    //    two happen to differ by one because they are written in step, which is exactly the kind of
+    //    coincidence a file should not rest on.
+    let mut point_id = Vec::with_capacity(topo.points.len());
     let mut vertex = Vec::with_capacity(topo.points.len());
     for p in &topo.points {
-        let point = w.entity(&format!("CARTESIAN_POINT('',({},{},{}))", real(p.x), real(p.y), real(p.z)))?;
-        vertex.push(w.entity(&format!("VERTEX_POINT('',#{point})"))?);
+        let c = w.entity(&format!("CARTESIAN_POINT('',({},{},{}))", real(p.x), real(p.y), real(p.z)))?;
+        point_id.push(c);
+        vertex.push(w.entity(&format!("VERTEX_POINT('',#{c})"))?);
     }
 
     // 3. One EDGE_CURVE per distinct edge, shared by the two faces that meet along it, each one a
@@ -280,10 +313,13 @@ pub fn step_faceted_brep(solid: &Solid, name: &str) -> Result<String, SolidError
                 w.entity(&format!("FACE_BOUND('',#{poly},.T.)"))?
             });
         }
-        // The placement sits on the face's own first corner, so it reuses that point's
-        // CARTESIAN_POINT instead of adding a second one at the same place.
+        // The placement sits on the face's own first corner, so it reuses that corner's
+        // CARTESIAN_POINT instead of adding a second point at the same place. It has to be the
+        // CARTESIAN_POINT and not the VERTEX_POINT standing on it: `axis2_placement_3d.location` is
+        // a `cartesian_point`, and pointing it at a topological vertex was a type error that a
+        // graph-walking reader never sees and a schema-checking reader rejects on the spot.
         let anchor = loops.first().and_then(|l| l.first()).copied();
-        let anchor_id = anchor.and_then(|p| vertex.get(p));
+        let anchor_id = anchor.and_then(|p| point_id.get(p).copied());
         let Some(anchor_id) = anchor_id else {
             return Err(SolidError::Invalid("a face has no loop to place it by".into()));
         };
@@ -881,6 +917,65 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_face_placement_sits_on_a_cartesian_point_and_not_on_a_vertex() {
+        // `axis2_placement_3d.location` is a `cartesian_point`. A `vertex_point` is a topological
+        // vertex, not a point in space, so a reader that type-checks the attribute rejects the
+        // entity — while a reader that only walks the graph sees nothing wrong at all, which is how
+        // this shipped wrong in the first place.
+        let s = box_at(Vec3::new(-1.0, -2.0, -3.0), Vec3::new(1.0, 2.0, 3.0));
+        let text = must(step_faceted_brep(&s, "box"), "export");
+        let g = parse(&text);
+
+        let faces = g.of_type("ADVANCED_FACE");
+        assert_eq!(faces.len(), 6, "a cube has six faces");
+        for face in faces {
+            let Some(plane) = g.out.get(&face).and_then(|refs| refs.iter().copied().find(|id| g.kind_of(*id) == "PLANE")) else {
+                panic!("#{face} has no PLANE");
+            };
+            let Some(&placement) = g.out.get(&plane).and_then(|refs| refs.first()) else {
+                panic!("#{plane} has no placement");
+            };
+            let Some(&location) = g.out.get(&placement).and_then(|refs| refs.first()) else {
+                panic!("#{placement} has no location");
+            };
+            assert_eq!(
+                g.kind_of(location),
+                "CARTESIAN_POINT",
+                "#{placement}'s location is a {}, and axis2_placement_3d.location is a cartesian_point",
+                g.kind_of(location)
+            );
+
+            // And it is the face's own first corner, sharing the corner's point rather than adding
+            // a second one at the same place. Exact equality is the right comparison here and not
+            // merely a convenient one: both numbers came out of the same `f64` through the same
+            // formatter, so any difference at all would be a real one.
+            let Some(&(kind, outer)) = g.bounds_of(face).first() else {
+                panic!("#{face} has no bound");
+            };
+            assert_eq!(kind, "FACE_OUTER_BOUND", "a cube's only bound is an outer one");
+            let Some(&poly) = g.out.get(&outer).and_then(|refs| refs.first()) else {
+                panic!("#{outer} has no loop");
+            };
+            let Some(corner) = g.loop_points(poly).first().copied() else {
+                panic!("#{poly} has no first vertex");
+            };
+            let [x, y, z] = g.coords_of(location);
+            assert_eq!(
+                (x, y, z),
+                (corner.x, corner.y, corner.z),
+                "#{placement} sits at ({x}, {y}, {z}) rather than on the face's own first corner {corner:?}"
+            );
+        }
+
+        // Sharing is the point: the placements add no points of their own.
+        assert_eq!(
+            g.count("CARTESIAN_POINT"),
+            9,
+            "the face placements reuse the eight corners; only the shape representation adds one, for the world origin"
+        );
     }
 
     #[test]
