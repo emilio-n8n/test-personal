@@ -568,6 +568,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cadcraft-asm"
+version = "0.7.0"
+dependencies = [
+ "cadcraft-geom",
+ "cadcraft-solid",
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "cadcraft-cli"
 version = "0.7.0"
 dependencies = [

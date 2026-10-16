@@ -557,3 +557,30 @@ workspace-wide format/lint pass that the 3D work breaks.**
 
 That is the map to work from. It also proves the thing this session was for: 12 crates judged in
 parallel, on GitHub's runners, without touching this VM's two cores.
+
+### CI found a real defect in the new NURBS code (run #8)
+
+`geom` went from green to red the moment `nurbs.rs` was declared public, which is the pipeline
+doing its job on brand-new code. Locally reproduced:
+
+```
+cargo test -p cadcraft-geom
+  nurbs::nurbs3d_tests::derivative_matches_finite_difference FAILED
+  crates/geom/src/nurbs.rs:1182: x 1.1875 vs 1.812500000042405
+  test result: FAILED. 123 passed; 1 failed
+```
+
+The analytic `derivative(u, 1)` disagrees with a central difference of `eval` by ~0.6 on a cubic —
+that is not a tolerance, it is a wrong derivative for a degree-3 curve. The degree-1 and degree-2
+cases pass, so the fault is in the de Boor derivative path for degree >= 3 (or in what the second
+argument means: `derivative(u, order)` is being called with `1`, and if the implementation reads it
+as an order rather than a repeating count the result is a different quantity entirely).
+
+**Not fixed here** — the fix needs the derivative rewritten against a known-good curve and checked
+against finite differences at several degrees, which is a task for a fresh agent with budget.
+Everything else in `geom` passes: 123 of 124.
+
+Also worth noting: the GitHub logs API returns **403 for this account** (`Must have admin rights`),
+so job logs cannot be read from here. Only the job-level pass/fail list is visible. To see an error
+message, reproduce it locally on the crate in question — which is exactly what the local terminal is
+still for when CI cannot be interrogated.
