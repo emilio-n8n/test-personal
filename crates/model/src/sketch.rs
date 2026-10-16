@@ -25,7 +25,7 @@ use cadcraft_geom::Vec2;
 use serde::{Deserialize, Serialize};
 
 use cadcraft_constraints::expr::{Env, ExprError, eval_with, parse, valid_name};
-use cadcraft_constraints::{SolveOptions, format_value, MAX_CONSTRAINTS};
+use cadcraft_constraints::{MAX_CONSTRAINTS, SolveOptions, format_value};
 
 /// A point in the sketch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -246,15 +246,19 @@ fn rank(m: &[f64], rows: usize, cols: usize) -> usize {
                 a.swap(piv * cols + c, row * cols + c);
             }
         }
-        let p = *a.get(row * cols + col)?;
+        // Indices are always in bounds here (`row < rows`, `r < rows`, `col < cols`, `c < cols`),
+        // so the checked-access fallbacks below are unreachable; they keep the never-panic rule.
+        let p = a.get(row * cols + col).copied().unwrap_or(0.0);
         for r in row + 1..rows {
-            let f = *a.get(r * cols + col)? / p;
+            let f = a.get(r * cols + col).copied().unwrap_or(0.0) / p;
             if f == 0.0 {
                 continue;
             }
             for c in col..cols {
-                let v = *a.get(row * cols + c)?;
-                *a.get_mut(r * cols + c)? -= f * v;
+                let v = a.get(row * cols + c).copied().unwrap_or(0.0);
+                if let Some(slot) = a.get_mut(r * cols + c) {
+                    *slot -= f * v;
+                }
             }
         }
         rank += 1;
@@ -486,56 +490,26 @@ fn eval_constraint(
 ) -> Result<(), SketchError> {
     match c {
         SketchConstraint::Coincident { a, b, .. } => {
-            let pa = point_pos(x, layout, entities, *a).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Coincident".into(),
-                id: *a,
-            })?;
-            let pb = point_pos(x, layout, entities, *b).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Coincident".into(),
-                id: *b,
-            })?;
+            let pa = point_pos(x, layout, entities, *a).ok_or_else(|| SketchError::NoSuchPoint { name: "Coincident".into(), id: *a })?;
+            let pb = point_pos(x, layout, entities, *b).ok_or_else(|| SketchError::NoSuchPoint { name: "Coincident".into(), id: *b })?;
             out.push(pa.x - pb.x);
             out.push(pa.y - pb.y);
         }
         SketchConstraint::Horizontal { a, b, .. } => {
-            let pa = point_pos(x, layout, entities, *a).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Horizontal".into(),
-                id: *a,
-            })?;
-            let pb = point_pos(x, layout, entities, *b).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Horizontal".into(),
-                id: *b,
-            })?;
+            let pa = point_pos(x, layout, entities, *a).ok_or_else(|| SketchError::NoSuchPoint { name: "Horizontal".into(), id: *a })?;
+            let pb = point_pos(x, layout, entities, *b).ok_or_else(|| SketchError::NoSuchPoint { name: "Horizontal".into(), id: *b })?;
             out.push(pa.y - pb.y);
         }
         SketchConstraint::Vertical { a, b, .. } => {
-            let pa = point_pos(x, layout, entities, *a).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Vertical".into(),
-                id: *a,
-            })?;
-            let pb = point_pos(x, layout, entities, *b).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Vertical".into(),
-                id: *b,
-            })?;
+            let pa = point_pos(x, layout, entities, *a).ok_or_else(|| SketchError::NoSuchPoint { name: "Vertical".into(), id: *a })?;
+            let pb = point_pos(x, layout, entities, *b).ok_or_else(|| SketchError::NoSuchPoint { name: "Vertical".into(), id: *b })?;
             out.push(pa.x - pb.x);
         }
         SketchConstraint::Parallel { a, b, c, d, .. } => {
-            let pa = point_pos(x, layout, entities, *a).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Parallel".into(),
-                id: *a,
-            })?;
-            let pb = point_pos(x, layout, entities, *b).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Parallel".into(),
-                id: *b,
-            })?;
-            let pc = point_pos(x, layout, entities, *c).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Parallel".into(),
-                id: *c,
-            })?;
-            let pd = point_pos(x, layout, entities, *d).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Parallel".into(),
-                id: *d,
-            })?;
+            let pa = point_pos(x, layout, entities, *a).ok_or_else(|| SketchError::NoSuchPoint { name: "Parallel".into(), id: *a })?;
+            let pb = point_pos(x, layout, entities, *b).ok_or_else(|| SketchError::NoSuchPoint { name: "Parallel".into(), id: *b })?;
+            let pc = point_pos(x, layout, entities, *c).ok_or_else(|| SketchError::NoSuchPoint { name: "Parallel".into(), id: *c })?;
+            let pd = point_pos(x, layout, entities, *d).ok_or_else(|| SketchError::NoSuchPoint { name: "Parallel".into(), id: *d })?;
             let d1 = pb - pa;
             let d2 = pd - pc;
             let l1 = d1.len();
@@ -546,22 +520,10 @@ fn eval_constraint(
             out.push(d1.cross(d2) / (l1 * l2));
         }
         SketchConstraint::Perpendicular { a, b, c, d, .. } => {
-            let pa = point_pos(x, layout, entities, *a).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Perpendicular".into(),
-                id: *a,
-            })?;
-            let pb = point_pos(x, layout, entities, *b).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Perpendicular".into(),
-                id: *b,
-            })?;
-            let pc = point_pos(x, layout, entities, *c).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Perpendicular".into(),
-                id: *c,
-            })?;
-            let pd = point_pos(x, layout, entities, *d).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Perpendicular".into(),
-                id: *d,
-            })?;
+            let pa = point_pos(x, layout, entities, *a).ok_or_else(|| SketchError::NoSuchPoint { name: "Perpendicular".into(), id: *a })?;
+            let pb = point_pos(x, layout, entities, *b).ok_or_else(|| SketchError::NoSuchPoint { name: "Perpendicular".into(), id: *b })?;
+            let pc = point_pos(x, layout, entities, *c).ok_or_else(|| SketchError::NoSuchPoint { name: "Perpendicular".into(), id: *c })?;
+            let pd = point_pos(x, layout, entities, *d).ok_or_else(|| SketchError::NoSuchPoint { name: "Perpendicular".into(), id: *d })?;
             let d1 = pb - pa;
             let d2 = pd - pc;
             let l1 = d1.len();
@@ -572,18 +534,9 @@ fn eval_constraint(
             out.push(d1.dot(d2) / (l1 * l2));
         }
         SketchConstraint::Tangent { line_a, line_b, circle, .. } => {
-            let pa = point_pos(x, layout, entities, *line_a).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Tangent".into(),
-                id: *line_a,
-            })?;
-            let pb = point_pos(x, layout, entities, *line_b).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Tangent".into(),
-                id: *line_b,
-            })?;
-            let (cc, cr) = circle_at(x, layout, entities, *circle).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Tangent".into(),
-                id: *circle,
-            })?;
+            let pa = point_pos(x, layout, entities, *line_a).ok_or_else(|| SketchError::NoSuchPoint { name: "Tangent".into(), id: *line_a })?;
+            let pb = point_pos(x, layout, entities, *line_b).ok_or_else(|| SketchError::NoSuchPoint { name: "Tangent".into(), id: *line_b })?;
+            let (cc, cr) = circle_at(x, layout, entities, *circle).ok_or_else(|| SketchError::NoSuchPoint { name: "Tangent".into(), id: *circle })?;
             let d = pb - pa;
             let l = d.len();
             if l < 1e-12 {
@@ -593,65 +546,28 @@ fn eval_constraint(
             out.push((cc - pa).dot(n).abs() - cr.abs());
         }
         SketchConstraint::Equal { a, b, c, d, .. } => {
-            let pa = point_pos(x, layout, entities, *a).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Equal".into(),
-                id: *a,
-            })?;
-            let pb = point_pos(x, layout, entities, *b).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Equal".into(),
-                id: *b,
-            })?;
-            let pc = point_pos(x, layout, entities, *c).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Equal".into(),
-                id: *c,
-            })?;
-            let pd = point_pos(x, layout, entities, *d).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Equal".into(),
-                id: *d,
-            })?;
+            let pa = point_pos(x, layout, entities, *a).ok_or_else(|| SketchError::NoSuchPoint { name: "Equal".into(), id: *a })?;
+            let pb = point_pos(x, layout, entities, *b).ok_or_else(|| SketchError::NoSuchPoint { name: "Equal".into(), id: *b })?;
+            let pc = point_pos(x, layout, entities, *c).ok_or_else(|| SketchError::NoSuchPoint { name: "Equal".into(), id: *c })?;
+            let pd = point_pos(x, layout, entities, *d).ok_or_else(|| SketchError::NoSuchPoint { name: "Equal".into(), id: *d })?;
             out.push(pa.dist(pb) - pc.dist(pd));
         }
         SketchConstraint::Distance { a, b, param, .. } => {
-            let pa = point_pos(x, layout, entities, *a).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Distance".into(),
-                id: *a,
-            })?;
-            let pb = point_pos(x, layout, entities, *b).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Distance".into(),
-                id: *b,
-            })?;
-            let target = params.get(param).ok_or_else(|| SketchError::NoSuchParameter {
-                name: param.clone(),
-            })?;
+            let pa = point_pos(x, layout, entities, *a).ok_or_else(|| SketchError::NoSuchPoint { name: "Distance".into(), id: *a })?;
+            let pb = point_pos(x, layout, entities, *b).ok_or_else(|| SketchError::NoSuchPoint { name: "Distance".into(), id: *b })?;
+            let target = params.get(param).ok_or_else(|| SketchError::NoSuchParameter { name: param.clone() })?;
             out.push(pa.dist(pb) - target);
         }
         SketchConstraint::Radius { circle, param, .. } => {
-            let (_, cr) = circle_at(x, layout, entities, *circle).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Radius".into(),
-                id: *circle,
-            })?;
-            let target = params.get(param).ok_or_else(|| SketchError::NoSuchParameter {
-                name: param.clone(),
-            })?;
+            let (_, cr) = circle_at(x, layout, entities, *circle).ok_or_else(|| SketchError::NoSuchPoint { name: "Radius".into(), id: *circle })?;
+            let target = params.get(param).ok_or_else(|| SketchError::NoSuchParameter { name: param.clone() })?;
             out.push(cr - target);
         }
         SketchConstraint::Angle { a, b, c, d, param, .. } => {
-            let pa = point_pos(x, layout, entities, *a).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Angle".into(),
-                id: *a,
-            })?;
-            let pb = point_pos(x, layout, entities, *b).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Angle".into(),
-                id: *b,
-            })?;
-            let pc = point_pos(x, layout, entities, *c).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Angle".into(),
-                id: *c,
-            })?;
-            let pd = point_pos(x, layout, entities, *d).ok_or_else(|| SketchError::NoSuchPoint {
-                name: "Angle".into(),
-                id: *d,
-            })?;
+            let pa = point_pos(x, layout, entities, *a).ok_or_else(|| SketchError::NoSuchPoint { name: "Angle".into(), id: *a })?;
+            let pb = point_pos(x, layout, entities, *b).ok_or_else(|| SketchError::NoSuchPoint { name: "Angle".into(), id: *b })?;
+            let pc = point_pos(x, layout, entities, *c).ok_or_else(|| SketchError::NoSuchPoint { name: "Angle".into(), id: *c })?;
+            let pd = point_pos(x, layout, entities, *d).ok_or_else(|| SketchError::NoSuchPoint { name: "Angle".into(), id: *d })?;
             let d1 = pb - pa;
             let d2 = pd - pc;
             let l1 = d1.len();
@@ -660,9 +576,7 @@ fn eval_constraint(
                 return Err(SketchError::ZeroLengthLine);
             }
             let angle = d1.angle_to(d2);
-            let target = params.get(param).ok_or_else(|| SketchError::NoSuchParameter {
-                name: param.clone(),
-            })?;
+            let target = params.get(param).ok_or_else(|| SketchError::NoSuchParameter { name: param.clone() })?;
             out.push(angle - target);
         }
     }
@@ -695,11 +609,7 @@ fn constraint_rows(c: &SketchConstraint) -> usize {
 impl Sketch {
     /// Create a new empty sketch.
     pub fn new() -> Self {
-        Sketch {
-            entities: Vec::new(),
-            constraints: Vec::new(),
-            parameters: BTreeMap::new(),
-        }
+        Sketch { entities: Vec::new(), constraints: Vec::new(), parameters: BTreeMap::new() }
     }
 
     /// Add an entity to the sketch.
@@ -724,10 +634,7 @@ impl Sketch {
     pub fn solve(&mut self, _opts: &SolveOptions) -> Result<SolveReport, SketchError> {
         // Check constraint count
         if self.constraints.len() > MAX_CONSTRAINTS {
-            return Err(SketchError::TooManyConstraints {
-                got: self.constraints.len(),
-                limit: MAX_CONSTRAINTS,
-            });
+            return Err(SketchError::TooManyConstraints { got: self.constraints.len(), limit: MAX_CONSTRAINTS });
         }
 
         // Check for duplicate point ids
@@ -768,10 +675,7 @@ impl Sketch {
             };
             for id in refs {
                 if !self.point_exists(id) {
-                    return Err(SketchError::NoSuchPoint {
-                        name: constraint_name(c).to_string(),
-                        id,
-                    });
+                    return Err(SketchError::NoSuchPoint { name: constraint_name(c).to_string(), id });
                 }
             }
         }
@@ -794,10 +698,7 @@ impl Sketch {
         // Check that all parameter values are finite
         for (name, value) in &self.parameters {
             if !value.is_finite() {
-                return Err(SketchError::NonFiniteParameter {
-                    name: name.clone(),
-                    value: *value,
-                });
+                return Err(SketchError::NonFiniteParameter { name: name.clone(), value: *value });
             }
         }
 
@@ -870,14 +771,7 @@ impl Sketch {
         // Write back the solution
         write_back(&mut self.entities, &layout, &x);
 
-        Ok(SolveReport {
-            converged,
-            dof,
-            redundant,
-            conflicting,
-            iterations,
-            residual,
-        })
+        Ok(SolveReport { converged, dof, redundant, conflicting, iterations, residual })
     }
 
     /// Check if a point with the given id exists in the sketch.

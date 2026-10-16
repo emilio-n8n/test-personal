@@ -48,6 +48,7 @@ mod expr;
 mod feature;
 mod file;
 mod rebuild;
+pub mod sketch;
 
 pub use error::ModelError;
 pub use expr::{BinOp, Expr, evaluate, parse};
