@@ -596,7 +596,7 @@ mod tests {
         for i in 1..20 {
             let t = lo + (hi - lo) * i as f64 / 20.0;
             let h = 1e-6;
-            let fd = (s.eval(t + h) - s.eval(t - h)) / (2.0 * h);
+            let fd = (s.eval(t + h) - s.eval(t - h)) / (h * 2.0);
             assert!(s.derivative(t).near(fd, 1e-4), "{t}: {:?} vs {fd:?}", s.derivative(t));
         }
         // Clamped end: the derivative points along the last control leg.
@@ -680,7 +680,7 @@ mod tests {
         assert!(j.eval(lo).near(Vec2::new(-5.0, 0.0), 1e-12) && j.eval(hi).near(Vec2::new(12.0, 2.0), 1e-12));
         // The line part is straight (parameter = distance), the spline part unchanged.
         for i in 0..=10 {
-            assert!(j.eval(lo + 0.5 * i as f64).near(Vec2::new(-5.0 + 0.5 * i as f64, 0.0), 1e-12));
+            assert!(j.eval(lo + i as f64 * 0.5).near(Vec2::new(-5.0 + i as f64 * 0.5, 0.0), 1e-12));
             let f = i as f64 / 10.0;
             assert!(j.eval(5.0 + (hi - 5.0) * f).near(s.eval(f), 1e-9));
         }
@@ -714,7 +714,7 @@ mod tests {
         let (lo, hi) = q.domain();
         let t = q.param_at_length(lo, std::f64::consts::PI);
         assert!(q.eval(t).near(Vec2::new(0.0, 2.0), 1e-6));
-        let t = q.param_at_length(hi, -std::f64::consts::PI / 2.0);
+        let t = q.param_at_length(hi, -(std::f64::consts::PI / 2.0));
         assert!(q.eval(t).near(Vec2::new(-2f64.sqrt(), 2f64.sqrt()), 1e-6));
         assert_eq!(q.param_at_length(lo, 1e9), hi);
     }
@@ -760,7 +760,7 @@ mod tests {
         // Ramanujan's approximation is good to ~1e-5 relative here.
         let (a, b) = (5.0f64, 3.0f64);
         let h = ((a - b) / (a + b)).powi(2);
-        let ram = std::f64::consts::PI * (a + b) * (1.0 + 3.0 * h / (10.0 + (4.0 - 3.0 * h).sqrt()));
+        let ram = std::f64::consts::PI * (a + b) * (1.0 + h * 3.0 / (10.0 + (4.0 - h * 3.0).sqrt()));
         assert!((e.length() - ram).abs() < 1e-4);
         let t = e.param_at_length(0.0, e.length() / 4.0).unwrap();
         assert!((t - FRAC_PI_2).abs() < 1e-9);
@@ -942,7 +942,14 @@ impl NurbsCurve {
         self.try_eval(u)
     }
 
-    /// `order == 0` gives the point itself. Orders above the degree are zero.
+    /// Derivative of the curve at `u`, of the given `order`: `0` is the point
+    /// itself, `1` the first derivative (tangent), `2` the second, and so on;
+    /// orders above the degree are zero. Computed exactly by differentiating the
+    /// control points `order` times — each step scales the differences by
+    /// `degree / knot_span` and trims one knot off each end of the knot vector —
+    /// then evaluating the resulting lower-degree B-spline. The curve is
+    /// non-rational (weights are deferred), so no homogeneous correction applies.
+    /// Out-of-domain parameters are clamped; a non-finite `u` evaluates at `lo`.
     pub fn derivative(&self, u: f64, order: usize) -> crate::Vec3 {
         if !self.is_valid() {
             return crate::Vec3::ZERO;
@@ -955,7 +962,14 @@ impl NurbsCurve {
         if order > self.degree {
             return crate::Vec3::ZERO;
         }
+        // Each differentiation step lowers the degree by one, drops one control
+        // point and trims one knot off each end of the working knot vector, so
+        // after `s` steps the working vector is `knots[s .. len - s]`. Both the
+        // difference denominators and the final evaluation must read that
+        // trimmed vector: evaluating against the original knots shifts the span
+        // search by one and silently returns the wrong derivative.
         let mut q: Vec<crate::Vec3> = self.control.clone();
+        let mut knots = self.knots.clone();
         let mut deg = self.degree;
         for _ in 0..order {
             if q.len() < 2 {
@@ -964,8 +978,8 @@ impl NurbsCurve {
             let n = q.len();
             let mut next = Vec::with_capacity(n - 1);
             for i in 0..n - 1 {
-                let a = self.knots.get(i + deg + 1).copied().unwrap_or(0.0);
-                let b = self.knots.get(i + 1).copied().unwrap_or(0.0);
+                let a = knots.get(i + deg + 1).copied().unwrap_or(0.0);
+                let b = knots.get(i + 1).copied().unwrap_or(0.0);
                 let denom = a - b;
                 let scale = if denom.abs() > 1e-14 { deg as f64 / denom } else { 0.0 };
                 let diff = q.get(i + 1).copied().unwrap_or(crate::Vec3::ZERO) - q.get(i).copied().unwrap_or(crate::Vec3::ZERO);
@@ -973,13 +987,20 @@ impl NurbsCurve {
             }
             q = next;
             deg = deg.saturating_sub(1);
+            // Unreachable-empty for a validated curve with `order <= degree`
+            // (at least two knots always remain); the guard only keeps a future
+            // refactor from panicking.
+            if knots.len() >= 2 {
+                knots.remove(0);
+                knots.pop();
+            }
         }
         let n = q.len().saturating_sub(1);
-        let mut span = crate::spline::find_span(n, deg, u, &self.knots);
+        let mut span = crate::spline::find_span(n, deg, u, &knots);
         if span > n {
             span = n;
         }
-        let b = crate::spline::basis(span, u, deg, &self.knots);
+        let b = crate::spline::basis(span, u, deg, &knots);
         let mut p = crate::Vec3::ZERO;
         for (k, nb) in b.iter().enumerate() {
             let idx = span + k;
@@ -1071,7 +1092,7 @@ mod nurbs3d_tests {
         for i in 0..=10 {
             let t = i as f64 / 10.0;
             let o = 1.0 - t;
-            let expected = c0 * (o * o) + c1 * (2.0 * o * t) + c2 * (t * t);
+            let expected = c0 * (o * o) + c1 * (o * 2.0 * t) + c2 * (t * t);
             let got = c.eval(t);
             assert!((got - expected).len() < 1e-12);
         }
@@ -1141,12 +1162,105 @@ mod nurbs3d_tests {
             let ana = c.derivative(u, 1);
             let um = (u - h).clamp(lo, hi);
             let up = (u + h).clamp(lo, hi);
-            let num = (c.eval(up) - c.eval(um)) * (1.0 / (2.0 * h));
+            let num = (c.eval(up) - c.eval(um)) * (1.0 / (h * 2.0));
             // componentwise compare
             assert!((ana.x - num.x).abs() < 1e-6, "x {} vs {}", ana.x, num.x);
             assert!((ana.y - num.y).abs() < 1e-6, "y {} vs {}", ana.y, num.y);
             assert!((ana.z - num.z).abs() < 1e-6, "z {} vs {}", ana.z, num.z);
         }
+    }
+
+    /// de Casteljau evaluation of a Bezier segment with the given control points.
+    fn bezier(pts: &[crate::Vec3], t: f64) -> crate::Vec3 {
+        let mut d = pts.to_vec();
+        let mut n = d.len();
+        while n > 1 {
+            for i in 0..n - 1 {
+                d[i] = d[i] + (d[i + 1] - d[i]) * t;
+            }
+            n -= 1;
+        }
+        d[0]
+    }
+
+    #[test]
+    fn derivative_matches_closed_form_bezier() {
+        // A single Bezier segment (fully clamped knots, no interior knots): the
+        // derivative of degree p is the degree p-1 Bezier of the scaled
+        // control-point differences — exact, no finite differences needed.
+        let p0 = crate::Vec3::new(1.0, -2.0, 0.5);
+        let p1 = crate::Vec3::new(4.0, 0.5, -1.0);
+        let p2 = crate::Vec3::new(-2.0, 3.0, 2.0);
+        let p3 = crate::Vec3::new(5.0, 1.0, -3.0);
+
+        // Degree 1: the derivative is the constant P1 - P0.
+        let c = NurbsCurve::new(1, vec![0.0, 0.0, 1.0, 1.0], vec![p0, p1]).unwrap();
+        for i in 0..=10 {
+            let u = i as f64 / 10.0;
+            assert!(c.derivative(u, 0).near(c.eval(u), 1e-12), "deg1 d0 at {}", u);
+            assert!((c.derivative(u, 1) - (p1 - p0)).len() < 1e-12, "deg1 d1 at {}", u);
+            assert!(c.derivative(u, 2).near(crate::Vec3::ZERO, 1e-12), "deg1 d2 at {}", u);
+        }
+
+        // Degree 2: the first derivative runs along 2(P1-P0) -> 2(P2-P1); the
+        // second is the constant 2(P2 - 2P1 + P0).
+        let c = NurbsCurve::new(2, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], vec![p0, p1, p2]).unwrap();
+        for i in 0..=10 {
+            let u = i as f64 / 10.0;
+            let d1 = (p1 - p0) * (2.0 * (1.0 - u)) + (p2 - p1) * (u * 2.0);
+            assert!((c.derivative(u, 1) - d1).len() < 1e-12, "deg2 d1 at {}", u);
+            let d2 = (p2 - p1 * 2.0 + p0) * 2.0;
+            assert!((c.derivative(u, 2) - d2).len() < 1e-12, "deg2 d2 at {}", u);
+            assert!(c.derivative(u, 3).near(crate::Vec3::ZERO, 1e-12), "deg2 d3 at {}", u);
+        }
+
+        // Degree 3: the first derivative is the quadratic Bezier of
+        // 3(P_{i+1} - P_i), the second the line of 6(P_{i+2} - 2P_{i+1} + P_i),
+        // the third the constant 6(P3 - 3P2 + 3P1 - P0).
+        let c = NurbsCurve::new(3, vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], vec![p0, p1, p2, p3]).unwrap();
+        let q0 = p1 - p0;
+        let q1 = p2 - p1;
+        let q2 = p3 - p2;
+        for i in 0..=10 {
+            let u = i as f64 / 10.0;
+            let d1 = bezier(&[q0 * 3.0, q1 * 3.0, q2 * 3.0], u);
+            assert!((c.derivative(u, 1) - d1).len() < 1e-12, "deg3 d1 at {}", u);
+            let d2 = (q1 - q0) * (6.0 * (1.0 - u)) + (q2 - q1) * (u * 6.0);
+            assert!((c.derivative(u, 2) - d2).len() < 1e-12, "deg3 d2 at {}", u);
+            let d3 = (q2 - q1 * 2.0 + q0) * 6.0;
+            assert!((c.derivative(u, 3) - d3).len() < 1e-12, "deg3 d3 at {}", u);
+            assert!(c.derivative(u, 4).near(crate::Vec3::ZERO, 1e-12), "deg3 d4 at {}", u);
+        }
+    }
+
+    #[test]
+    fn derivative_with_repeated_knots_matches_closed_form() {
+        // Degree 2 with a double interior knot at u = 1: two quadratic Bezier
+        // segments meeting C^0 at P2, so the derivative jumps at the break.
+        let p0 = crate::Vec3::new(0.0, 0.0, 0.0);
+        let p1 = crate::Vec3::new(2.0, 1.0, -1.0);
+        let p2 = crate::Vec3::new(1.0, 4.0, 0.5);
+        let p3 = crate::Vec3::new(5.0, 3.0, 2.0);
+        let p4 = crate::Vec3::new(6.0, -2.0, 1.0);
+        let c = NurbsCurve::new(2, vec![0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 2.0], vec![p0, p1, p2, p3, p4]).unwrap();
+        for i in 0..=48 {
+            let u = i as f64 / 24.0;
+            if (u - 1.0).abs() < 1e-15 {
+                continue; // the break: asserted separately below
+            }
+            let (d1, d2) = if u < 1.0 {
+                ((p1 - p0) * (2.0 * (1.0 - u)) + (p2 - p1) * (u * 2.0), (p2 - p1 * 2.0 + p0) * 2.0)
+            } else {
+                let s = u - 1.0;
+                ((p3 - p2) * (2.0 * (1.0 - s)) + (p4 - p3) * (s * 2.0), (p4 - p3 * 2.0 + p2) * 2.0)
+            };
+            assert!((c.derivative(u, 1) - d1).len() < 1e-12, "d1 at {}", u);
+            assert!((c.derivative(u, 2) - d2).len() < 1e-12, "d2 at {}", u);
+        }
+        // At the break the half-open span convention returns the right derivative.
+        assert!((c.derivative(1.0, 1) - (p3 - p2) * 2.0).len() < 1e-12, "break d1");
+        assert!((c.derivative(1.0, 2) - (p4 - p3 * 2.0 + p2) * 2.0).len() < 1e-12, "break d2");
+        assert!(c.derivative(0.5, 3).near(crate::Vec3::ZERO, 1e-12), "d3");
     }
 
     #[test]
