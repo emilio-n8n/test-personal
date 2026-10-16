@@ -622,3 +622,25 @@ It also corrected a number everyone had been repeating: `union(box(0,0,0)-(2,2,1
 has volume **8**, not 12 — two 2×2×1 blocks are 4+4. The bounding box is 3×2×2 = 12, but the two
 missing 1×2×1 corners are not material. `tests/property.rs` asserts 12 and will fail whatever the
 kernel does; that assertion is wrong and `property.rs` is not the union agent's file to fix.
+
+---
+
+## The agent loop (new, 2026-10-16)
+
+`docs/agents/AGENT_PROTOCOL.md` is now binding alongside `SYSTEM_PROMPT.md`. Two changes to how work
+flows, both aimed at the same thing: **the orchestrator's context is the scarcest resource in the
+system, and it must stop being spent on verification and decisions that an agent can carry.**
+
+**1. Agents never stop to ask.** An ambiguity becomes a file in `docs/agents/questions/` (template in
+the protocol), the agent takes the least-damaging option, says so in its report, and keeps working.
+A question that lives in a dead session's context is lost; a question written to disk survives.
+The orchestrator answers into `docs/agents/answers/` when it next wakes.
+
+**2. Verification is a separate agent.** When an agent reports a doubt or a residual problem, the
+orchestrator launches a *verifier* — read-only, never the author — whose output is a verdict per
+claim: SUPPORTED / UNSUPPORTED / UNCLEAR with evidence. Anything UNSUPPORTED goes to a *fixer* scoped
+to exactly those items. The orchestrator no longer fixes by hand while agents are runnable.
+
+**What the orchestrator keeps:** reading the CI verdict, owning the shared files (module
+declarations, crate registration, PROGRESS.md), committing and pushing, answering questions, and
+refusing a delivery the verifier calls unsupported twice.
