@@ -293,3 +293,45 @@ randomized tests, so 68 hand-written tests written alongside the code gave false
 fundamental defects survived them. The remaining risk is concentrated there, not in the UI.
 
 **In flight:** the engine-commands agent (`crates/engine/src/cmd/solid.rs`).
+
+---
+
+## 2026-10-16 — Wave 1 validation, real numbers
+
+Toolchain restored a second time (rustc 1.99.1, repo needs >= 1.90, edition 2024).
+`cargo test -p cadcraft-solid`, every suite, nothing ignored:
+
+| Suite | Passed | Failed |
+|---|---:|---:|
+| `--lib` | 82 | 4 |
+| `property` | 9 | 3 |
+| `property_surface` | 7 | 10 |
+| `fuzz` | 8 | 2 |
+| `corpus` | 10 | 3 |
+| `step_interop` | **0** | **11** |
+
+Eleven compile errors had to be fixed first: all in agent-written test files that had never
+been run (inline format args with arithmetic, a moved value, a shadowed helper, an `Option` given
+to a `Result` helper, a method called from a free function, `u8::is_ascii_whitespace` where a
+by-value closure is required, a slice borrow not tied to its argument).
+
+**The headline finding: `step_interop` fails 11 of 11.** The independent second parser finds zero
+solids in the file the writer produces. So the STEP writer does not survive a reader written by
+anyone else — including one written to be lenient. That is exactly what `DAT-003` existed to find,
+and it means the STEP export is **not** an interchange feature today. It is a text file.
+
+Other findings:
+- `fuzz`: flipping a solid twice does not reproduce the faces exactly — a real `Face::flipped`
+  idempotence defect, with a seed (`0xf1a0000a`) and a full face dump.
+- `corpus`: a chamfer at size 100 on a 100-cube fails `used 2 times forward`. The blend path is
+  not scale-robust.
+- One corpus expectation is itself wrong (derives 600, asserts 936). Left visible rather than
+  corrected to match the kernel.
+- A hypothesis of mine about `revolve`'s on-axis guard was **falsified** by the suite in one run
+  (82/4 -> 80/6) and reverted; the reasoning is recorded in the source so it is not retried.
+
+Wave 1 is `CODE WRITTEN`. **0 `VALIDATED`.** Wave 2 stays closed. Nothing was deleted, weakened or
+ignored to improve any number above.
+
+Backup: `/home/emilio_developpeur/cadcraft-backup-3d.bundle`, complete history, verified. Push is
+impossible: `403`, `emilio-n8n` has no write access to `storytold/cadcraft`.
