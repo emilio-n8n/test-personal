@@ -335,3 +335,25 @@ ignored to improve any number above.
 
 Backup: `/home/emilio_developpeur/cadcraft-backup-3d.bundle`, complete history, verified. Push is
 impossible: `403`, `emilio-n8n` has no write access to `storytold/cadcraft`.
+
+### Blend scale defect — pinned, not guessed at
+
+`corpus::a_chamfer_removes_its_triangle_at_every_size` fails at exactly one cell of its grid:
+`side = 100, d = 0.25` — a chamfer whose width is 1/400 of the solid. Every other cell passes,
+including `side = 4, d = 0.25` (ratio 1/16). So the failure is a *relative* one, which points at the
+tolerance model rather than at the blend geometry: `tolerance_for(100*sqrt(3))` is 1.73e-7, and the
+weld grid in `weld_edges` is sized from it, so at this ratio the chamfer's own features sit only
+1.4e6 cells from their neighbours while the grid quantises at ~5.8e6 cells per unit.
+
+Failure mode: the vertical edge `(99.75, 0, 0) -> (99.75, 0, 100)` — the seam between the y=0 face
+and the bevel face — is traversed twice in the same direction, so the two faces disagree about which
+side is out.
+
+This is **not** fixed here, and deliberately so. It is a kernel defect on the critical path for
+`KER-FEAT-*`, a plausible but unproven cause, and no budget to verify a speculative fix against 82
+passing tests. The failing corpus test is itself the pinned regression: the next attempt starts by
+bisecting `side` to find where the ratio starts to matter, then measures the weld grid against the
+chamfer's feature size at that point.
+
+The same defect family is already visible in `KER-BOOL-002` (union across a shared plane) — both are
+cases where two faces must agree along a seam and the welding does not make them.
