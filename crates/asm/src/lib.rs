@@ -43,12 +43,7 @@ pub struct Quat {
 }
 
 impl Quat {
-    pub const IDENTITY: Quat = Quat {
-        w: 1.0,
-        x: 0.0,
-        y: 0.0,
-        z: 0.0,
-    };
+    pub const IDENTITY: Quat = Quat { w: 1.0, x: 0.0, y: 0.0, z: 0.0 };
 
     pub const fn new(w: f64, x: f64, y: f64, z: f64) -> Self {
         Quat { w, x, y, z }
@@ -64,21 +59,13 @@ impl Quat {
     }
 
     pub fn length(self) -> f64 {
-        self.w
-            .hypot(self.x)
-            .hypot(self.y)
-            .hypot(self.z)
+        self.w.hypot(self.x).hypot(self.y).hypot(self.z)
     }
 
     /// Quaternion from an axis and an angle (radians, right-handed).
     pub fn from_axis_angle(axis: Vec3, angle: f64) -> Self {
         if !axis.is_finite() || !angle.is_finite() {
-            return Quat {
-                w: f64::NAN,
-                x: 0.0,
-                y: 0.0,
-                z: 0.0,
-            };
+            return Quat { w: f64::NAN, x: 0.0, y: 0.0, z: 0.0 };
         }
         let len = axis.len();
         if len <= 0.0 {
@@ -86,21 +73,11 @@ impl Quat {
         }
         let k = axis * (1.0 / len);
         let (s, c) = (angle * 0.5).sin_cos();
-        Quat {
-            w: c,
-            x: k.x * s,
-            y: k.y * s,
-            z: k.z * s,
-        }
+        Quat { w: c, x: k.x * s, y: k.y * s, z: k.z * s }
     }
 
     pub fn conjugate(self) -> Self {
-        Quat {
-            w: self.w,
-            x: -self.x,
-            y: -self.y,
-            z: -self.z,
-        }
+        Quat { w: self.w, x: -self.x, y: -self.y, z: -self.z }
     }
 
     pub fn multiply(self, rhs: Self) -> Self {
@@ -137,21 +114,8 @@ impl Quat {
     }
 
     pub fn normalize(self) -> Self {
-        let n = self
-            .w
-            .hypot(self.x)
-            .hypot(self.y)
-            .hypot(self.z);
-        if n > 0.0 && n.is_finite() {
-            Quat {
-                w: self.w / n,
-                x: self.x / n,
-                y: self.y / n,
-                z: self.z / n,
-            }
-        } else {
-            Quat::IDENTITY
-        }
+        let n = self.w.hypot(self.x).hypot(self.y).hypot(self.z);
+        if n > 0.0 && n.is_finite() { Quat { w: self.w / n, x: self.x / n, y: self.y / n, z: self.z / n } } else { Quat::IDENTITY }
     }
 
     pub fn is_finite(&self) -> bool {
@@ -182,16 +146,10 @@ pub struct Transform {
 }
 
 impl Transform {
-    pub const IDENTITY: Transform = Transform {
-        translation: Vec3::ZERO,
-        rotation: Quat::IDENTITY,
-    };
+    pub const IDENTITY: Transform = Transform { translation: Vec3::ZERO, rotation: Quat::IDENTITY };
 
     pub fn new(translation: Vec3, rotation: Quat) -> Self {
-        Transform {
-            translation,
-            rotation,
-        }
+        Transform { translation, rotation }
     }
 
     pub fn apply(&self, p: Vec3) -> Vec3 {
@@ -226,11 +184,7 @@ pub struct Component {
 
 impl Component {
     pub fn new(name: impl Into<String>, body: Solid, origin: Transform) -> Self {
-        Component {
-            name: name.into(),
-            body,
-            origin,
-        }
+        Component { name: name.into(), body, origin }
     }
 }
 
@@ -302,8 +256,7 @@ impl Assembly {
     }
 
     pub fn component(&self, name: &str) -> Result<&Component, AsmError> {
-        self.get_component(name)
-            .ok_or_else(|| AsmError::NotFound(name.to_string()))
+        self.get_component(name).ok_or_else(|| AsmError::NotFound(name.to_string()))
     }
 
     pub fn find_component(&self, name: &str) -> Option<&Component> {
@@ -315,11 +268,7 @@ impl Assembly {
     }
 
     pub fn component_mut(&mut self, name: &str) -> Result<&mut Component, AsmError> {
-        let pos = self
-            .components
-            .iter()
-            .position(|c| c.name == name)
-            .ok_or_else(|| AsmError::NotFound(name.to_string()))?;
+        let pos = self.components.iter().position(|c| c.name == name).ok_or_else(|| AsmError::NotFound(name.to_string()))?;
         Ok(&mut self.components[pos])
     }
 
@@ -327,11 +276,7 @@ impl Assembly {
         if name.is_empty() {
             return Err(AsmError::EmptyName);
         }
-        let pos = self
-            .components
-            .iter()
-            .position(|c| c.name == name)
-            .ok_or_else(|| AsmError::NotFound(name.to_string()))?;
+        let pos = self.components.iter().position(|c| c.name == name).ok_or_else(|| AsmError::NotFound(name.to_string()))?;
         let removed = self.components.remove(pos);
         // A joint that pointed at a removed component has no meaning.
         self.joints.retain(|j| {
@@ -404,9 +349,7 @@ impl Assembly {
         let count = self.components.len();
         for i in 0..count {
             if failed {
-                states.push(State::Blocked(
-                    "not rebuilt: an earlier component failed".to_string(),
-                ));
+                states.push(State::Blocked("not rebuilt: an earlier component failed".to_string()));
                 continue;
             }
             let result = build(&self.components[i]);
@@ -477,10 +420,7 @@ mod tests {
         assert!(matches!(a.add_component(empty), Err(AsmError::EmptyName)));
         assert!(a.add_component(Component::new("part", box_solid.clone(), Transform::IDENTITY)).is_ok());
         // duplicate refused
-        assert!(matches!(
-            a.add_component(Component::new("part", box_solid, Transform::IDENTITY)),
-            Err(AsmError::Duplicate(_))
-        ));
+        assert!(matches!(a.add_component(Component::new("part", box_solid, Transform::IDENTITY)), Err(AsmError::Duplicate(_))));
         // lookup missing
         assert!(matches!(a.component("nope"), Err(AsmError::NotFound(_))));
         // remove missing
@@ -491,25 +431,13 @@ mod tests {
     fn placement_discipline_failed_keeps_origin_blocked_is_not_failed() {
         let mut a = Assembly::new();
         let box_solid = support::box_at(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).expect("box");
-        a.add_component(Component::new("a", box_solid.clone(), Transform::IDENTITY))
-            .expect("add a");
-        a.add_component(Component::new(
-            "b",
-            box_solid.clone(),
-            Transform::new(Vec3::new(5.0, 0.0, 0.0), Quat::IDENTITY),
-        ))
-        .expect("add b");
+        a.add_component(Component::new("a", box_solid.clone(), Transform::IDENTITY)).expect("add a");
+        a.add_component(Component::new("b", box_solid.clone(), Transform::new(Vec3::new(5.0, 0.0, 0.0), Quat::IDENTITY))).expect("add b");
 
         let before_a = a.component("a").expect("a").origin;
         let before_b = a.component("b").expect("b").origin;
 
-        let states = a.rebuild(|c| {
-            if c.name == "a" {
-                Err("boom".to_string())
-            } else {
-                Ok(c.body.clone())
-            }
-        });
+        let states = a.rebuild(|c| if c.name == "a" { Err("boom".to_string()) } else { Ok(c.body.clone()) });
 
         assert_eq!(states.len(), 2);
         assert!(matches!(states[0], State::Failed(_)));

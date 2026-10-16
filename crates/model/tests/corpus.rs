@@ -102,7 +102,11 @@ fn a_plate_driven_by_a_named_depth() {
     add(
         &mut m,
         "body",
-        FeatureKind::Extrude { sketch: must(Sketch::rect(Vec3::ZERO, Vec3::X, Vec3::Y, 20.0, 12.0), "sketch"), depth: "height".into(), symmetric: false },
+        FeatureKind::Extrude {
+            sketch: must(Sketch::rect(Vec3::ZERO, Vec3::X, Vec3::Y, 20.0, 12.0), "sketch"),
+            depth: "height".into(),
+            symmetric: false,
+        },
     );
     let v = clean_volume(&mut m, "plate");
     assert!(near(v, 20.0 * 12.0 * 6.0, 1e-12), "20 x 12 x 6 is 1440, got {v}");
@@ -118,12 +122,36 @@ fn a_plate_driven_by_a_named_depth() {
 
     // And a dimension driven by another dimension follows through it.
     must(m.set("twice", Param::Formula("height * 2".into())), "twice");
-    must(m.replace("body", FeatureKind::Extrude { sketch: must(Sketch::rect(Vec3::ZERO, Vec3::X, Vec3::Y, 20.0, 12.0), "sketch"), depth: "twice".into(), symmetric: false }), "body");
+    must(
+        m.replace(
+            "body",
+            FeatureKind::Extrude {
+                sketch: must(Sketch::rect(Vec3::ZERO, Vec3::X, Vec3::Y, 20.0, 12.0), "sketch"),
+                depth: "twice".into(),
+                symmetric: false,
+            },
+        ),
+        "body",
+    );
     assert!(near(clean_volume(&mut m, "plate x2"), 20.0 * 12.0 * 16.0, 1e-12), "twice 8 is 16 deep: 3840, got {}", volume(&m));
 
     // A symmetric extrusion is the same volume from the same sketch, centred on the plane.
-    must(m.replace("body", FeatureKind::Extrude { sketch: must(Sketch::rect(Vec3::ZERO, Vec3::X, Vec3::Y, 20.0, 12.0), "sketch"), depth: "height".into(), symmetric: true }), "body");
-    assert!(near(clean_volume(&mut m, "symmetric plate"), 20.0 * 12.0 * 8.0, 1e-12), "a symmetric extrude of depth 8 is still 8 deep: 1920, got {}", volume(&m));
+    must(
+        m.replace(
+            "body",
+            FeatureKind::Extrude {
+                sketch: must(Sketch::rect(Vec3::ZERO, Vec3::X, Vec3::Y, 20.0, 12.0), "sketch"),
+                depth: "height".into(),
+                symmetric: true,
+            },
+        ),
+        "body",
+    );
+    assert!(
+        near(clean_volume(&mut m, "symmetric plate"), 20.0 * 12.0 * 8.0, 1e-12),
+        "a symmetric extrude of depth 8 is still 8 deep: 1920, got {}",
+        volume(&m)
+    );
 }
 
 // ====================================================================================
@@ -217,7 +245,11 @@ fn a_chamfered_block_built_from_an_edge_reference() {
     add(
         &mut m,
         "body",
-        FeatureKind::Extrude { sketch: must(Sketch::rect(Vec3::ZERO, Vec3::X, Vec3::Y, 10.0, 10.0), "sketch"), depth: "height".into(), symmetric: false },
+        FeatureKind::Extrude {
+            sketch: must(Sketch::rect(Vec3::ZERO, Vec3::X, Vec3::Y, 10.0, 10.0), "sketch"),
+            depth: "height".into(),
+            symmetric: false,
+        },
     );
     add(
         &mut m,
@@ -234,14 +266,23 @@ fn a_chamfered_block_built_from_an_edge_reference() {
     assert!(near(v, 1000.0 - 0.5 * 1.0 * 1.0 * 10.0, 1e-9), "a bevel of 1 removes 5, so 995, got {v}");
 
     // And a round of the same radius removes *less* than the bevel, and is inside the band.
-    must(m.replace("bevel", FeatureKind::Blend { edges: vec![EdgeRef::new(Vec3::new(10.0, 0.0, 5.0), 1e-6)], size: "bevel".into(), segments: 8, round: true }), "bevel");
+    must(
+        m.replace(
+            "bevel",
+            FeatureKind::Blend { edges: vec![EdgeRef::new(Vec3::new(10.0, 0.0, 5.0), 1e-6)], size: "bevel".into(), segments: 8, round: true },
+        ),
+        "bevel",
+    );
     rebuild(&mut m, None);
     let r = rebuild(&mut m, None);
     assert!(r.problems.is_empty(), "{:?}", r.problems);
     let rounded = volume(&m);
     let removed_per_edge = (1000.0 - rounded) / 10.0;
     let exact = 1.0 * (1.0 - std::f64::consts::FRAC_PI_4);
-    assert!(removed_per_edge >= exact * (1.0 - 1e-9), "a round of radius 1 removed {removed_per_edge} per unit, under the {exact} a true round removes");
+    assert!(
+        removed_per_edge >= exact * (1.0 - 1e-9),
+        "a round of radius 1 removed {removed_per_edge} per unit, under the {exact} a true round removes"
+    );
     assert!(removed_per_edge <= 0.5 * (1.0 + 1e-9), "a round of radius 1 removed {removed_per_edge} per unit, over the 0.5 a bevel removes");
 }
 
@@ -269,14 +310,22 @@ fn a_plate_with_a_blind_pocket_cut_by_a_second_extrude() {
     add(
         &mut m,
         "body",
-        FeatureKind::Extrude { sketch: must(Sketch::rect(Vec3::ZERO, Vec3::X, Vec3::Y, 20.0, 12.0), "sketch"), depth: "height".into(), symmetric: false },
+        FeatureKind::Extrude {
+            sketch: must(Sketch::rect(Vec3::ZERO, Vec3::X, Vec3::Y, 20.0, 12.0), "sketch"),
+            depth: "height".into(),
+            symmetric: false,
+        },
     );
     // The tool's sketch sits at z = 3 and its extrusion runs 4, so it reaches z = 7 — one unit above
     // the plate — and its floor is 3 below the plate's top face.
     add(
         &mut m,
         "pocket_tool",
-        FeatureKind::Extrude { sketch: must(Sketch::rect(Vec3::new(7.0, 4.0, 3.0), Vec3::X, Vec3::Y, 6.0, 4.0), "tool sketch"), depth: "pocket_depth".into(), symmetric: false },
+        FeatureKind::Extrude {
+            sketch: must(Sketch::rect(Vec3::new(7.0, 4.0, 3.0), Vec3::X, Vec3::Y, 6.0, 4.0), "tool sketch"),
+            depth: "pocket_depth".into(),
+            symmetric: false,
+        },
     );
     add(&mut m, "pocket", FeatureKind::Cut { tool: "pocket_tool".into() });
 
@@ -362,7 +411,10 @@ fn a_revolved_ring_is_a_solid_or_a_named_failure() {
             let problem = r.problems.iter().find(|p| p.feature == "ring").map(|p| p.message.clone()).unwrap_or_default();
             assert!(!problem.is_empty(), "a revolve that does not build has to say why");
             assert!(matches!(r.problems[0].kind, State::Failed(_)), "and it is a failure, not a shrug: {:?}", r.problems[0].kind);
-            println!("  revolved_ring NOT BUILT: {problem}\n    expected when it is: V={:.9}", 0.5 * segments as f64 * (std::f64::consts::TAU / segments as f64).sin() * 3.0);
+            println!(
+                "  revolved_ring NOT BUILT: {problem}\n    expected when it is: V={:.9}",
+                0.5 * segments as f64 * (std::f64::consts::TAU / segments as f64).sin() * 3.0
+            );
         }
     }
 }
@@ -396,11 +448,7 @@ fn every_corpus_part_survives_a_save_and_reopen() {
         assert_eq!(reopened.parameters, m.parameters, "{name}: the parameters round-trip as written");
         assert_eq!(reopened.features, m.features, "{name}: the history round-trips");
         assert!(near(volume(&reopened), volume(&m), 1e-12), "{name}: reopened at {} against {}", volume(&reopened), volume(&m));
-        assert_eq!(
-            reopened.solid().map(|s| s.faces.len()),
-            m.solid().map(|s| s.faces.len()),
-            "{name}: the same shape, not just the same volume"
-        );
+        assert_eq!(reopened.solid().map(|s| s.faces.len()), m.solid().map(|s| s.faces.len()), "{name}: the same shape, not just the same volume");
         checked += 1;
     }
     println!("corpus save/reopen: {checked} parts round-tripped through a document");
@@ -415,7 +463,11 @@ fn plate_model() -> Model {
     add(
         &mut m,
         "body",
-        FeatureKind::Extrude { sketch: must(Sketch::rect(Vec3::ZERO, Vec3::X, Vec3::Y, 20.0, 12.0), "sketch"), depth: "height".into(), symmetric: false },
+        FeatureKind::Extrude {
+            sketch: must(Sketch::rect(Vec3::ZERO, Vec3::X, Vec3::Y, 20.0, 12.0), "sketch"),
+            depth: "height".into(),
+            symmetric: false,
+        },
     );
     m
 }
@@ -423,10 +475,8 @@ fn plate_model() -> Model {
 fn holed_plate_model() -> Model {
     let mut m = Model::new();
     param(&mut m, "height", 6.0);
-    let sketch = sketch_xy(
-        0.0,
-        vec![rect_loop(Vec3::ZERO, Vec3::X, Vec3::Y, 20.0, 12.0), hole_loop(Vec3::new(6.0, 3.0, 0.0), Vec3::X, Vec3::Y, 8.0, 6.0)],
-    );
+    let sketch =
+        sketch_xy(0.0, vec![rect_loop(Vec3::ZERO, Vec3::X, Vec3::Y, 20.0, 12.0), hole_loop(Vec3::new(6.0, 3.0, 0.0), Vec3::X, Vec3::Y, 8.0, 6.0)]);
     add(&mut m, "body", FeatureKind::Extrude { sketch, depth: "height".into(), symmetric: false });
     m
 }
@@ -453,9 +503,17 @@ fn chamfered_model() -> Model {
     add(
         &mut m,
         "body",
-        FeatureKind::Extrude { sketch: must(Sketch::rect(Vec3::ZERO, Vec3::X, Vec3::Y, 10.0, 10.0), "sketch"), depth: "height".into(), symmetric: false },
+        FeatureKind::Extrude {
+            sketch: must(Sketch::rect(Vec3::ZERO, Vec3::X, Vec3::Y, 10.0, 10.0), "sketch"),
+            depth: "height".into(),
+            symmetric: false,
+        },
     );
-    add(&mut m, "bevel", FeatureKind::Blend { edges: vec![EdgeRef::new(Vec3::new(10.0, 0.0, 5.0), 1e-6)], size: "bevel".into(), segments: 1, round: false });
+    add(
+        &mut m,
+        "bevel",
+        FeatureKind::Blend { edges: vec![EdgeRef::new(Vec3::new(10.0, 0.0, 5.0), 1e-6)], size: "bevel".into(), segments: 1, round: false },
+    );
     m
 }
 
@@ -466,12 +524,20 @@ fn pocketed_model() -> Model {
     add(
         &mut m,
         "body",
-        FeatureKind::Extrude { sketch: must(Sketch::rect(Vec3::ZERO, Vec3::X, Vec3::Y, 20.0, 12.0), "sketch"), depth: "height".into(), symmetric: false },
+        FeatureKind::Extrude {
+            sketch: must(Sketch::rect(Vec3::ZERO, Vec3::X, Vec3::Y, 20.0, 12.0), "sketch"),
+            depth: "height".into(),
+            symmetric: false,
+        },
     );
     add(
         &mut m,
         "pocket_tool",
-        FeatureKind::Extrude { sketch: must(Sketch::rect(Vec3::new(7.0, 4.0, 3.0), Vec3::X, Vec3::Y, 6.0, 4.0), "tool sketch"), depth: "pocket_depth".into(), symmetric: false },
+        FeatureKind::Extrude {
+            sketch: must(Sketch::rect(Vec3::new(7.0, 4.0, 3.0), Vec3::X, Vec3::Y, 6.0, 4.0), "tool sketch"),
+            depth: "pocket_depth".into(),
+            symmetric: false,
+        },
     );
     add(&mut m, "pocket", FeatureKind::Cut { tool: "pocket_tool".into() });
     m

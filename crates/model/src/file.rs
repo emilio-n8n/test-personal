@@ -464,7 +464,9 @@ fn blend_input(model: &Model, index: usize) -> Option<&Solid> {
         .collect();
     (0..index).rev().find_map(|i| {
         let name = model.features.get(i)?.name.as_str();
-        if tools.contains(&name) { return None; }
+        if tools.contains(&name) {
+            return None;
+        }
         model.records.get(i)?.last_good.as_ref()
     })
 }
@@ -698,11 +700,7 @@ fn resolve_fingerprints(model: &mut Model, map: &TopologyMap) -> (ResolutionRepo
                     let middle = edges.as_ref().and_then(|list| list.get(found)).map(|e| e.a.mid(e.b));
                     match middle {
                         Some(middle) => {
-                            let keep = if reference.tolerance.is_finite() && reference.tolerance > 0.0 {
-                                reference.tolerance
-                            } else {
-                                tolerance
-                            };
+                            let keep = if reference.tolerance.is_finite() && reference.tolerance > 0.0 { reference.tolerance } else { tolerance };
                             re_point.push((index, edge, EdgeRef::new(middle, keep)));
                             report.record(&name, edge, Resolution::Fingerprint);
                         }
@@ -711,11 +709,7 @@ fn resolve_fingerprints(model: &mut Model, map: &TopologyMap) -> (ResolutionRepo
                 }
                 // No fingerprint matched. Whatever the point still finds is what the document has
                 // always been able to promise, and no more.
-                None => report.record(
-                    &name,
-                    edge,
-                    if landed.is_some() { Resolution::Fallback } else { Resolution::Unresolved },
-                ),
+                None => report.record(&name, edge, if landed.is_some() { Resolution::Fallback } else { Resolution::Unresolved }),
             }
         }
     }

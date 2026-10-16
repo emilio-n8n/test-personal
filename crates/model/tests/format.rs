@@ -348,7 +348,10 @@ fn a_map_that_describes_nothing_falls_back_instead_of_guessing() {
                 } ] } }
             }),
         ),
-        ("a feature nobody has heard of", serde_json::json!({ "version": 1, "features": { "ghost": { "edges": [ { "start": [ 0.0, 0.0, 0.0 ], "end": [ 0.0, 0.0, 0.0 ], "face_a": [ 0.0, 0.0, 0.0 ], "face_b": [ 0.0, 0.0, 0.0 ], "length_ratio": 0.0, "at": [ [ 0.0, 0.0 ], [ 0.0, 0.0 ] ], "square": [ 0.0, 0.0 ], "dihedral": 0.0 } ] } } })),
+        (
+            "a feature nobody has heard of",
+            serde_json::json!({ "version": 1, "features": { "ghost": { "edges": [ { "start": [ 0.0, 0.0, 0.0 ], "end": [ 0.0, 0.0, 0.0 ], "face_a": [ 0.0, 0.0, 0.0 ], "face_b": [ 0.0, 0.0, 0.0 ], "length_ratio": 0.0, "at": [ [ 0.0, 0.0 ], [ 0.0, 0.0 ] ], "square": [ 0.0, 0.0 ], "dihedral": 0.0 } ] } } }),
+        ),
     ] {
         let mut hostile = as_json(&text);
         hostile["topology"] = replacement;

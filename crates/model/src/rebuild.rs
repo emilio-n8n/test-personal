@@ -263,4 +263,3 @@ fn sketch_plane(sketch: &crate::feature::Sketch) -> Result<Plane, ModelError> {
 fn plane_tolerance(plane: &Plane) -> f64 {
     (plane.to_world(1.0, 0.0).dist(plane.origin) * 1e-9).clamp(1e-12, 1e-3)
 }
-
