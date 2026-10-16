@@ -825,7 +825,7 @@ mod tests {
         assert!(c.target.near(Vec3::ZERO, 1e-12), "{:?}", c.target);
         assert!(near(c.azimuth, 0.7, 1e-15) && near(c.elevation, -0.3, 1e-15), "the direction was kept");
         // Far enough that every corner of the body is inside the frustum.
-        let half = 10.0 * std::f64::consts::SQRT_3;
+        let half = 10.0 * 3f64.sqrt();
         assert!(c.distance >= half / (45.0f64.to_radians() * 0.5).tan(), "distance {}", c.distance);
         assert!(c.camera().is_valid());
         // A body far from the origin moves the target to it.

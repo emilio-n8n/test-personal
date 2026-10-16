@@ -437,3 +437,29 @@ specification.
 
 `viewport3` / `viewport_state` / `panels3` are still undeclared and still uncompiled — that is the
 next piece of work, and it needs `ui-egui`'s module list edited, which is mine to do.
+
+### UI 3D modules: declared, found broken, reverted
+
+`crates/ui-egui/src/{viewport3.rs, viewport_state.rs, panels3/**}` were declared in `lib.rs` so they
+would finally compile. They do not. Errors found on first compilation, none of which is a typo I
+could fix inside the budget:
+
+- `viewport3.rs`: `egui::UV_TOP_RIGHT` does not exist in this egui version.
+- `viewport_state.rs`: `std::f64::consts::SQRT_3` is behind the unstable `more_float_constants`
+  feature.
+- `panels3/parameters.rs`: two conflicting `Default` impls for `ParameterPanel`.
+- `panels3/feature_tree.rs`: `.clicked()` / `.double_clicked()` called on `InnerResponse`, which
+  does not have them; a `Color32: From<Pos2>` conversion that cannot exist.
+
+**The declarations were reverted.** Declaring them breaks the compilation of `cadcraft-ui-egui`,
+which is the 2D application — 157 tests that pass. Trading that for three modules that do not
+compile is not a trade worth making. The files stay on disk as `CODE WRITTEN` and undeclared, which
+is exactly what "not integrated" means.
+
+Separately, and this one is fixed: the engine agent added four commands
+(`New Solid Model`, `Set Parameter`, `List Parameters`, `Model Info`) whose Ukrainian rows were
+missing, which the crate's own i18n test caught. `uk.tsv` now has them and **ui-egui is back to
+157 passed, 0 failed**.
+
+A warning that matters more than the errors: **the i18n test only failed because I ran the suite.**
+Nothing in the pipeline would have told me those four commands shipped untranslated.

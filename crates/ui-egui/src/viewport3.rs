@@ -116,7 +116,7 @@ pub fn show(ui: &mut egui::Ui, scene: &Scene, frame: &Frame, state: &mut Viewpor
         let p = ui.painter_at(rect);
         p.rect_filled(rect, 0.0, t.canvas);
         if let Some(texture) = texture(ui.ctx(), frame) {
-            p.image(texture.id(), rect, egui::UV_TOP_RIGHT, egui::Color32::WHITE);
+            p.image(texture.id(), rect, egui::Color32::WHITE);
         }
         p.rect_stroke(rect, 0.0, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
     }

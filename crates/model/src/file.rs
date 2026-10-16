@@ -304,8 +304,7 @@ impl EdgeFingerprint {
         (self.length_ratio - other.length_ratio).abs() <= POSITION
             && (self.dihedral - other.dihedral).abs() <= ANGLE
             && close_unordered(self.square, other.square, ANGLE)
-            && close_unordered(self.at[0], other.at[0], POSITION)
-            && close_unordered(self.at[1], other.at[1], POSITION)
+            && close_unordered_pair(self.at, other.at, POSITION)
     }
 
     /// Every number here a real one: a fingerprint that cannot be compared matches nothing, which
@@ -336,8 +335,13 @@ fn in_plane_diagonal(face: &Face) -> f64 {
 /// rebuild preserves: which one the kernel happened to number first is an accident of how the
 /// solid was built, and a fingerprint that depended on it would break for no reason.
 fn close_unordered(a: [f64; 2], b: [f64; 2], tolerance: f64) -> bool {
-    let same = |p: [f64; 2], q: [f64; 2]| (p[0] - q[0]).abs() <= tolerance && (p[1] - q[1]).abs() <= tolerance;
-    (same(a, b[0]) && same(a[1], b[1])) || (same(a, b[1]) && same(a[1], b[0]))
+    (a[0] - b[0]).abs() <= tolerance && (a[1] - b[1]).abs() <= tolerance
+}
+
+/// The same for a *pair* of points, which has no order of its own to preserve.
+fn close_unordered_pair(a: [[f64; 2]; 2], b: [[f64; 2]; 2], tolerance: f64) -> bool {
+    (close_unordered(a[0], b[0], tolerance) && close_unordered(a[1], b[1], tolerance))
+        || (close_unordered(a[0], b[1], tolerance) && close_unordered(a[1], b[0], tolerance))
 }
 
 // -------------------------------------------------------------------------------------------
