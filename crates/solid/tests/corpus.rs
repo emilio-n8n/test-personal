@@ -51,9 +51,7 @@
 //! **Execution status: every test in this file is `NOT EXECUTED`.** It was written without a
 //! terminal and has never been compiled or run; see the report that came with it.
 
-use cadcraft_solid::{
-    Bool3, Plane, Region, Regions, Solid, Vec2, Vec3, boolean, chamfer, extrude, fillet, mass_properties, revolve, support,
-};
+use cadcraft_solid::{Bool3, Plane, Region, Regions, Solid, Vec2, Vec3, boolean, chamfer, extrude, fillet, mass_properties, revolve, support};
 
 fn must<T>(r: Result<T, cadcraft_solid::SolidError>, what: &str) -> T {
     match r {
@@ -203,14 +201,7 @@ fn an_l_bracket_with_ten_unit_legs() {
     let legs = 10.0;
     let t = 3.0;
     let h = 4.0;
-    let profile = vec![
-        Vec2::new(0.0, 0.0),
-        Vec2::new(legs, 0.0),
-        Vec2::new(legs, t),
-        Vec2::new(t, t),
-        Vec2::new(t, legs),
-        Vec2::new(0.0, legs),
-    ];
+    let profile = vec![Vec2::new(0.0, 0.0), Vec2::new(legs, 0.0), Vec2::new(legs, t), Vec2::new(t, t), Vec2::new(t, legs), Vec2::new(0.0, legs)];
     let bracket = must(extrude(&Region::new(profile.clone()).to_regions(), &Plane::xy(0.0), h), "extrude the bracket");
 
     // The shoelace and the perimeter, computed here rather than asked of anybody.
@@ -469,13 +460,25 @@ fn a_revolved_ring_of_sixteen_facets() {
     // The ratio is a property of the faceting alone, so it is checked whether or not the kernel
     // manages to build anything today.
     assert!(chord_ratio < 1.0, "a polygon inscribed in a circle has less area than the circle: {chord_ratio}");
-    assert!(near(faceted, exact * chord_ratio, 1e-12), "the faceted volume is the exact volume times the chord ratio: {faceted} vs {}", exact * chord_ratio);
+    assert!(
+        near(faceted, exact * chord_ratio, 1e-12),
+        "the faceted volume is the exact volume times the chord ratio: {faceted} vs {}",
+        exact * chord_ratio
+    );
 
     match revolve(&profile, &plane, axis, std::f64::consts::TAU, segments) {
         Ok(solid) => {
             s_validate(&solid, "revolved_ring");
-            assert!(near(solid.volume(), faceted, 1e-9), "a {segments}-facet ring of inner radius {ri}, outer {ro} and height {h} is {faceted}, got {}", solid.volume());
-            assert!(near(solid.volume() / exact, chord_ratio, 1e-9), "the faceted ring is {chord_ratio} of the cylinder it approximates: {}", solid.volume() / exact);
+            assert!(
+                near(solid.volume(), faceted, 1e-9),
+                "a {segments}-facet ring of inner radius {ri}, outer {ro} and height {h} is {faceted}, got {}",
+                solid.volume()
+            );
+            assert!(
+                near(solid.volume() / exact, chord_ratio, 1e-9),
+                "the faceted ring is {chord_ratio} of the cylinder it approximates: {}",
+                solid.volume() / exact
+            );
             println!("  {:<18} V={:.9} (exact cylinder {:.9}) faces={}", "revolved_ring", solid.volume(), exact, solid.faces.len());
             // The surface area is deliberately **not** asserted. `revolve` builds no caps for a
             // full turn (`if !full { … }` in `extrude.rs`), so even a working implementation would
@@ -493,15 +496,14 @@ fn a_revolved_ring_of_sixteen_facets() {
             // asserting a figure that no current code path could produce.
             println!(
                 "    a closed ring of this shape would have area {:.9} (ends {:.9} + walls {:.9}), which needs a partial turn",
-                segments as f64 * (std::f64::consts::TAU / segments as f64).sin() * 3.0 + 2.0 * segments as f64 * (std::f64::consts::PI / segments as f64).sin() * 3.0 * 1.0,
+                segments as f64 * (std::f64::consts::TAU / segments as f64).sin() * 3.0
+                    + 2.0 * segments as f64 * (std::f64::consts::PI / segments as f64).sin() * 3.0 * 1.0,
                 segments as f64 * (std::f64::consts::TAU / segments as f64).sin() * 3.0,
                 2.0 * segments as f64 * (std::f64::consts::PI / segments as f64).sin() * 3.0 * 1.0
             );
         }
         Err(e) => {
-            println!(
-                "  revolved_ring      NOT BUILT ({e})\n    expected when it is: V={faceted:.9} against {exact:.9} for the exact cylinder"
-            );
+            println!("  revolved_ring      NOT BUILT ({e})\n    expected when it is: V={faceted:.9} against {exact:.9} for the exact cylinder");
         }
     }
 }
@@ -631,7 +633,11 @@ fn the_corpus_closed_forms_agree_with_independent_derivations() {
         // The same area from the two regular polygons, each by its own formula.
         let outer = 0.5 * segments as f64 * 4.0 * step.sin();
         let inner = 0.5 * segments as f64 * 1.0 * step.sin();
-        assert!(near(polygon_ring, outer - inner, 1e-12), "at {segments} facets the ring is {polygon_ring} and the difference of the polygons is {}", outer - inner);
+        assert!(
+            near(polygon_ring, outer - inner, 1e-12),
+            "at {segments} facets the ring is {polygon_ring} and the difference of the polygons is {}",
+            outer - inner
+        );
         assert!(polygon_ring < std::f64::consts::PI * 3.0, "at {segments} facets the ring is smaller than the cylinder");
     }
 }
@@ -659,7 +665,10 @@ fn the_corpus_rebuilds_identically() {
             shape(&tube),
             shape(&bevelled),
             shape(&pocketed),
-            fillet(&block, &[cadcraft_solid::EdgeRef::new(Vec3::new(10.0, 0.0, 5.0), 1e-6)], 2.0, 8).ok().as_ref().map(|s| (s.volume(), s.area(), s.faces.len())),
+            fillet(&block, &[cadcraft_solid::EdgeRef::new(Vec3::new(10.0, 0.0, 5.0), 1e-6)], 2.0, 8)
+                .ok()
+                .as_ref()
+                .map(|s| (s.volume(), s.area(), s.faces.len())),
         ]
     };
     let first = build();
@@ -696,12 +705,8 @@ fn the_corpus_parts_are_distinguishable() {
         ),
         "bracket",
     );
-    let parts: [(&str, f64); 4] = [
-        ("plate", plate.volume()),
-        ("plate_with_hole", tube.volume()),
-        ("chamfered_block", bevelled.volume()),
-        ("l_bracket", bracket.volume()),
-    ];
+    let parts: [(&str, f64); 4] =
+        [("plate", plate.volume()), ("plate_with_hole", tube.volume()), ("chamfered_block", bevelled.volume()), ("l_bracket", bracket.volume())];
     for (i, (name, v)) in parts.iter().enumerate() {
         for (other_name, w) in parts.iter().skip(i + 1) {
             assert!(!near(*v, *w, 1e-12), "two corpus parts have the same volume: {name} and {other_name} are both {v}");

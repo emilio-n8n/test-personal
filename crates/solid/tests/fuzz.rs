@@ -42,7 +42,7 @@
 
 use cadcraft_solid::{
     Bool3, Edge, EdgeRef, Face, MassProperties, Mesh, Plane, Region, Regions, Solid, SolidError, Triangle, Vec2, Vec3, boolean, chamfer, extrude,
-    fillet, limits, mass_properties, mesh_from_solid, reverse_regions, revolve, stl_ascii, stl_binary, step_faceted_brep, step_schema, support,
+    fillet, limits, mass_properties, mesh_from_solid, reverse_regions, revolve, step_faceted_brep, step_schema, stl_ascii, stl_binary, support,
     tolerance_for,
 };
 
@@ -202,14 +202,7 @@ fn rectangle_with_a_doubled_corner() -> Vec<Vec2> {
 
 /// Two rectangles sharing one edge point exactly — a loop that touches itself at a vertex.
 fn self_touching() -> Vec<Vec2> {
-    vec![
-        Vec2::new(0.0, 0.0),
-        Vec2::new(4.0, 0.0),
-        Vec2::new(4.0, 4.0),
-        Vec2::new(2.0, 2.0),
-        Vec2::new(0.0, 4.0),
-        Vec2::new(0.0, 0.0),
-    ]
+    vec![Vec2::new(0.0, 0.0), Vec2::new(4.0, 0.0), Vec2::new(4.0, 4.0), Vec2::new(2.0, 2.0), Vec2::new(0.0, 4.0), Vec2::new(0.0, 0.0)]
 }
 
 /// Coordinates spread over the whole finite range, so every difference overflows or underflows.
@@ -258,12 +251,14 @@ fn hostile_profiles(rng: &mut Rng) -> Vec<Regions> {
         .to_regions(),
     );
     // The same hole twice.
-    out.push(
-        Region { outer: clockwise_rectangle(), holes: vec![clockwise_rectangle(), clockwise_rectangle()] }.to_regions(),
-    );
+    out.push(Region { outer: clockwise_rectangle(), holes: vec![clockwise_rectangle(), clockwise_rectangle()] }.to_regions());
     // A hole touching the outer loop exactly along an edge.
     out.push(
-        Region { outer: clockwise_rectangle(), holes: vec![vec![Vec2::new(0.0, 1.0), Vec2::new(0.0, 3.0), Vec2::new(2.0, 3.0), Vec2::new(2.0, 1.0)]] }.to_regions(),
+        Region {
+            outer: clockwise_rectangle(),
+            holes: vec![vec![Vec2::new(0.0, 1.0), Vec2::new(0.0, 3.0), Vec2::new(2.0, 3.0), Vec2::new(2.0, 1.0)]],
+        }
+        .to_regions(),
     );
     // Nested holes, which is a third level of nesting the kernel does not model.
     out.push(
@@ -472,14 +467,15 @@ fn faces_and_solids_survive_hostile_geometry() {
     for case in 0..CASES {
         let at = tag(seed, case);
         let loop_len = 3 + rng.pick(4);
-        let pts: Vec<Vec2> = (0..loop_len).map(|_| match rng.next() % 5 {
-            0 => Vec2::new(rng.hostile(), rng.hostile()),
-            1 => Vec2::new(1.0e300, rng.f64(10.0)),
-            2 => Vec2::new(rng.f64(1e-300), rng.f64(1e-300)),
-            3 => Vec2::new(f64::MAX, -f64::MAX),
-            _ => Vec2::new(rng.f64(10.0), rng.f64(10.0)),
-        })
-        .collect();
+        let pts: Vec<Vec2> = (0..loop_len)
+            .map(|_| match rng.next() % 5 {
+                0 => Vec2::new(rng.hostile(), rng.hostile()),
+                1 => Vec2::new(1.0e300, rng.f64(10.0)),
+                2 => Vec2::new(rng.f64(1e-300), rng.f64(1e-300)),
+                3 => Vec2::new(f64::MAX, -f64::MAX),
+                _ => Vec2::new(rng.f64(10.0), rng.f64(10.0)),
+            })
+            .collect();
         let region = Region::new(pts).to_regions();
         let sane_plane = Plane::xy(rng.f64(10.0));
 
@@ -508,7 +504,10 @@ fn faces_and_solids_survive_hostile_geometry() {
         // downstream is what has to survive. `Plane::new` would refuse, so it is built by hand.
         for origin in [Vec3::new(1.0e300, 0.0, 0.0), Vec3::new(-1.0e300, 1.0e300, 0.0), Vec3::new(1.0e-300, 0.0, 0.0)] {
             let hostile_plane = Plane { origin, normal: Vec3::Z, u: Vec3::X };
-            match Face::new(hostile_plane, Region::new(vec![Vec2::new(0.0, 0.0), Vec2::new(4.0, 0.0), Vec2::new(4.0, 4.0), Vec2::new(0.0, 4.0)]).to_regions()) {
+            match Face::new(
+                hostile_plane,
+                Region::new(vec![Vec2::new(0.0, 0.0), Vec2::new(4.0, 0.0), Vec2::new(4.0, 4.0), Vec2::new(0.0, 4.0)]).to_regions(),
+            ) {
                 Ok(f) => {
                     tally.built += 1;
                     let _ = f.area();
@@ -663,10 +662,7 @@ fn every_cap_is_a_refusal_rather_than_an_allocation() {
 }
 
 fn must_face(plane: Plane) -> Face {
-    match Face::new(
-        plane,
-        Region::new(vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0), Vec2::new(1.0, 1.0), Vec2::new(0.0, 1.0)]).to_regions(),
-    ) {
+    match Face::new(plane, Region::new(vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0), Vec2::new(1.0, 1.0), Vec2::new(0.0, 1.0)]).to_regions()) {
         Ok(f) => f,
         Err(e) => panic!("the fixture face should build: {e}"),
     }
@@ -830,7 +826,7 @@ fn blends_survive_hostile_references_tolerances_and_sizes() {
         Vec3::new(10.0, 0.0, 5.0), // a real edge
         Vec3::new(5.0, 0.0, 10.0), // another real edge
         Vec3::new(5.0, 5.0, 5.0),  // the middle: no edge
-        Vec3::new(0.0, 0.0, 0.0),   // a corner: three edges
+        Vec3::new(0.0, 0.0, 0.0),  // a corner: three edges
         Vec3::new(50.0, 50.0, 50.0),
         Vec3::new(f64::NAN, 0.0, 0.0),
         Vec3::new(f64::INFINITY, 0.0, 0.0),
@@ -938,7 +934,13 @@ fn the_writers_survive_hostile_solids_and_names() {
 
         // A solid built from one hostile face, which is the case where a coordinate of 1e300 or a
         // subnormal reaches the writer.
-        let pts: Vec<Vec2> = (0..4).map(|_| match rng.next() % 3 { 0 => Vec2::new(rng.hostile(), rng.hostile()), 1 => Vec2::new(1.0e300, 0.0), _ => Vec2::new(rng.f64(1.0), rng.f64(1.0)) }).collect();
+        let pts: Vec<Vec2> = (0..4)
+            .map(|_| match rng.next() % 3 {
+                0 => Vec2::new(rng.hostile(), rng.hostile()),
+                1 => Vec2::new(1.0e300, 0.0),
+                _ => Vec2::new(rng.f64(1.0), rng.f64(1.0)),
+            })
+            .collect();
         if let Ok(f) = Face::new(Plane::xy(0.0), Region::new(pts).to_regions())
             && let Ok(s) = Solid::from_faces(vec![f])
         {
@@ -1063,7 +1065,11 @@ fn every_generated_solid_is_a_value_that_survives_a_round_trip() {
         if let Ok(inside_out) = solid.flipped() {
             let mut flipped_solid = inside_out;
             let _ = flipped_solid.fix_orientation();
-            assert!(near(flipped_solid.volume(), volume, 1e-12), "{at}: fix_orientation did not repair an inside-out shell: {} vs {volume}", flipped_solid.volume());
+            assert!(
+                near(flipped_solid.volume(), volume, 1e-12),
+                "{at}: fix_orientation did not repair an inside-out shell: {} vs {volume}",
+                flipped_solid.volume()
+            );
         }
 
         // And the exporters see the same thing.

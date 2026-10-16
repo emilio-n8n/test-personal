@@ -41,7 +41,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cadcraft_solid::{EdgeRef, Plane, Solid, Vec3, extrude, fillet, mesh_from_solid, stl_ascii, step_faceted_brep, step_schema, support};
+use cadcraft_solid::{EdgeRef, Plane, Solid, Vec3, extrude, fillet, mesh_from_solid, step_faceted_brep, step_schema, stl_ascii, support};
 
 fn must<T, E: std::fmt::Debug>(r: Result<T, E>, what: &str) -> T {
     match r {
@@ -659,11 +659,8 @@ fn audit(solid: &Solid, text: &str) -> Audit {
     let shell = file.as_ref(file.arg(brep_args, 1), "a FACETED_BREP's outer shell");
     assert_eq!(shell, shells[0].id, "the solid's shell is the only shell in the file");
     let shell_args = file.args_of(shell, "CLOSED_SHELL");
-    let face_ids: Vec<usize> = file
-        .as_list(file.arg(shell_args, 1), "a CLOSED_SHELL's faces")
-        .iter()
-        .map(|a| file.as_ref(a, "a face of the shell"))
-        .collect();
+    let face_ids: Vec<usize> =
+        file.as_list(file.arg(shell_args, 1), "a CLOSED_SHELL's faces").iter().map(|a| file.as_ref(a, "a face of the shell")).collect();
     assert_eq!(
         face_ids.len(),
         solid.faces.len(),
@@ -699,11 +696,8 @@ fn audit(solid: &Solid, text: &str) -> Audit {
         assert!((ref_dir.len() - 1.0).abs() <= direction_slop, "face {fi}'s reference direction is {ref_dir:?}, not a unit vector");
         assert!(axis.dot(ref_dir).abs() <= direction_slop, "face {fi}'s placement is not a right-handed frame");
 
-        let bounds: Vec<usize> = file
-            .as_list(file.arg(face_args, 1), "a face's bounds")
-            .iter()
-            .map(|a| file.as_ref(a, "a bound of a face"))
-            .collect();
+        let bounds: Vec<usize> =
+            file.as_list(file.arg(face_args, 1), "a face's bounds").iter().map(|a| file.as_ref(a, "a bound of a face")).collect();
         let kernel_loops: Vec<usize> = kernel_face.region.loops().map(|l| l.len()).collect();
         assert_eq!(
             bounds.len(),
@@ -726,11 +720,8 @@ fn audit(solid: &Solid, text: &str) -> Audit {
 
             let poly = file.as_ref(file.arg(bound_args, 1), "a bound's loop");
             let poly_args = file.args_of(poly, "POLY_LOOP");
-            let verts: Vec<usize> = file
-                .as_list(self.arg(poly_args, 1), "a POLY_LOOP's polygon")
-                .iter()
-                .map(|a| file.as_ref(a, "a point of a polygon"))
-                .collect();
+            let verts: Vec<usize> =
+                file.as_list(self.arg(poly_args, 1), "a POLY_LOOP's polygon").iter().map(|a| file.as_ref(a, "a point of a polygon")).collect();
             let expected_len = kernel_loops.get(bi).copied().unwrap_or(0);
             assert_eq!(verts.len(), expected_len, "#{poly} has {} vertices, the kernel's loop {bi} of face {fi} has {expected_len}", verts.len());
             assert!(verts.len() >= 3, "#{poly} has {} vertices, and a polygon needs three", verts.len());
@@ -744,10 +735,7 @@ fn audit(solid: &Solid, text: &str) -> Audit {
             for p in &points {
                 let reach = p.dist(place_point);
                 let off = ((*p - place_point).dot(axis)).abs();
-                assert!(
-                    off <= uncertainty + reach * 1e-9,
-                    "face {fi} has a loop vertex {off} off its own plane, against a declared {uncertainty}"
-                );
+                assert!(off <= uncertainty + reach * 1e-9, "face {fi} has a loop vertex {off} off its own plane, against a declared {uncertainty}");
             }
             assert_eq!(winds_with(&points, axis), bi == 0, "face {fi}'s bound {bi} winds against its own normal {axis:?}");
             volume += loop_volume(&points, origin);
@@ -885,13 +873,7 @@ fn the_closed_shell_holds_exactly_the_faces_the_solid_has() {
         // Euler's count over the whole file: V - E + F of a closed shell is at least a sphere's 2,
         // and the three numbers come from three different parts of the file.
         let euler = a.vertices as i64 - a.edges as i64 + a.faces as i64;
-        assert!(
-            euler >= 2,
-            "{name}: V {} - E {} + F {} = {euler}, which is below a sphere's",
-            a.vertices,
-            a.edges,
-            a.faces
-        );
+        assert!(euler >= 2, "{name}: V {} - E {} + F {} = {euler}, which is below a sphere's", a.vertices, a.edges, a.faces);
     }
 }
 
@@ -1030,10 +1012,7 @@ fn step_and_ascii_stl_agree_about_the_same_solid() {
     );
     // And the mesh's own numbers — full precision, no formatting at all — agree with the file.
     let from_mesh: f64 = mesh.triangles().map(|t| (t.a - origin).dot((t.b - origin).cross(t.c - origin)) / 6.0).sum();
-    assert!(
-        (from_mesh - from_step).abs() <= 1e-9 * from_mesh.abs().max(1.0),
-        "the mesh says {from_mesh} and the STEP file says {from_step}"
-    );
+    assert!((from_mesh - from_step).abs() <= 1e-9 * from_mesh.abs().max(1.0), "the mesh says {from_mesh} and the STEP file says {from_step}");
 }
 
 #[test]

@@ -536,11 +536,12 @@ mod weld_tests {
             Ok(p) => p,
             Err(_) => return,
         };
-        let Some(a) = square_on(Plane::xy(0.0), [Vec3::new(lo, 0.0, 0.0), Vec3::new(4.0, 0.0, 0.0), Vec3::new(4.0, 2.0, 0.0), Vec3::new(lo, 2., 0.0)]) else {
+        let Some(a) =
+            square_on(Plane::xy(0.0), [Vec3::new(lo, 0.0, 0.0), Vec3::new(4.0, 0.0, 0.0), Vec3::new(4.0, 2.0, 0.0), Vec3::new(lo, 2., 0.0)])
+        else {
             return;
         };
-        let Some(b) =
-            square_on(upright, [Vec3::new(hi, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 2.0), Vec3::new(hi, 0.0, 2.0)])
+        let Some(b) = square_on(upright, [Vec3::new(hi, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 2.0), Vec3::new(hi, 0.0, 2.0)])
         else {
             return;
         };
@@ -555,7 +556,11 @@ mod weld_tests {
         // And the weld still does its other half: the upright face's base edge lies along the flat
         // face's, so the flat face has to be cut at (2, 0, 0) or the two edges no longer match.
         assert!(added >= 1, "nothing was split: {added}");
-        assert!(faces[0].vertices().iter().any(|v| v.near(Vec3::new(2.0, 0.0, 0.0), 1e-18)), "the flat face was not cut at (2, 0, 0): {:?}", faces[0].vertices());
+        assert!(
+            faces[0].vertices().iter().any(|v| v.near(Vec3::new(2.0, 0.0, 0.0), 1e-18)),
+            "the flat face was not cut at (2, 0, 0): {:?}",
+            faces[0].vertices()
+        );
     }
 
     #[test]
@@ -570,7 +575,9 @@ mod weld_tests {
         let Some(a) = square_on(Plane::xy(0.0), [Vec3::ZERO, Vec3::new(4.0, 0.0, 0.0), Vec3::new(4.0, 2.0, 0.0), Vec3::new(0.0, 2.0, 0.0)]) else {
             return;
         };
-        let Some(b) = square_on(upright, [Vec3::new(0.5e-9, 0.0, 0.0), Vec3::new(3.0, 0.0, 0.0), Vec3::new(3.0, 0.0, 2.0), Vec3::new(0.5e-9, 0.0, 2.0)]) else {
+        let Some(b) =
+            square_on(upright, [Vec3::new(0.5e-9, 0.0, 0.0), Vec3::new(3.0, 0.0, 0.0), Vec3::new(3.0, 0.0, 2.0), Vec3::new(0.5e-9, 0.0, 2.0)])
+        else {
             return;
         };
         let mut faces = vec![a, b];
@@ -591,7 +598,9 @@ mod weld_tests {
             return;
         };
         let gap = 2.0 + 4.0 * tol;
-        let Some(b) = square_on(Plane::xy(0.0), [Vec3::new(gap, 0.0, 0.0), Vec3::new(4.0, 0.0, 0.0), Vec3::new(4.0, 2.0, 0.0), Vec3::new(gap, 2.0, 0.0)]) else {
+        let Some(b) =
+            square_on(Plane::xy(0.0), [Vec3::new(gap, 0.0, 0.0), Vec3::new(4.0, 0.0, 0.0), Vec3::new(4.0, 2.0, 0.0), Vec3::new(gap, 2.0, 0.0)])
+        else {
             return;
         };
         let mut faces = vec![a, b];

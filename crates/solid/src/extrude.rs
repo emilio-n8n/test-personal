@@ -343,10 +343,12 @@ mod tests {
         // turned by `angle`. A cap plane built from `profile_plane x axis` holds neither.
         for f in &caps {
             let at_start = f.plane.normal.near(Vec3::Z, 1e-12);
-            for p in profile.loops() {
-                let w = plane.to_world(p.x, p.y);
-                let w = if at_start { w } else { rotate_about_axis(w - plane.origin, axis, angle) + plane.origin };
-                assert!(f.plane.distance(w).abs() < 1e-12, "the cap with normal {:?} does not hold {w:?}", f.plane.normal);
+            for lp in profile.loops() {
+                for p in lp {
+                    let w = plane.to_world(p.x, p.y);
+                    let w = if at_start { w } else { rotate_about_axis(w - plane.origin, axis, angle) + plane.origin };
+                    assert!(f.plane.distance(w).abs() < 1e-12, "the cap with normal {:?} does not hold {w:?}", f.plane.normal);
+                }
             }
         }
     }
