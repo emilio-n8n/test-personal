@@ -306,7 +306,9 @@ mod tests {
         u.validate().unwrap_or_else(|e| panic!("{e}"));
         u.validate_vertices().unwrap_or_else(|e| panic!("{e}"));
         // Two 2x2x1 blocks whose shared face only half overlaps enclose 4 + 4 and nothing to subtract.
+        // (The bounding box is 3x2x2 = 12, but the two missing 1x2x1 corners are not material.)
         assert!((u.volume() - 8.0).abs() < 1e-9, "volume {}", u.volume());
+        assert_eq!(u.faces.len(), 10, "an L-shaped prism has 10 faces");
         // Two faces on z = 1, one looking each way, each covering exactly the part the other misses.
         let on_plane: Vec<(Vec3, f64)> =
             u.faces.iter().filter(|f| f.plane.distance(Vec3::new(1.5, 1.0, 1.0)).abs() < 1e-12).map(|f| (f.plane.normal, f.area())).collect();
@@ -314,13 +316,28 @@ mod tests {
         assert!(on_plane.iter().any(|(n, _)| n.near(Vec3::Z, 1e-12)), "one looks up: {on_plane:?}");
         assert!(on_plane.iter().any(|(n, _)| n.near(Vec3::Z * -1.0, 1e-12)), "and the other looks down: {on_plane:?}");
         for (_, area) in &on_plane {
-            assert!((area - 1.0).abs() < 1e-9, "each exposed part is 1x2, got {area}");
+            assert!((area - 2.0).abs() < 1e-9, "each exposed part is 1x2, got {area}");
         }
         // The step is still a step: the overhang is there and the step down is not.
         assert!(u.contains(Vec3::new(0.5, 1.0, 0.5)), "the lower block");
         assert!(u.contains(Vec3::new(2.5, 1.0, 1.5)), "the overhang");
         assert!(!u.contains(Vec3::new(2.5, 1.0, 0.5)), "and nothing under the overhang");
         assert!(!u.contains(Vec3::new(0.5, 1.0, 1.5)), "nor above the step");
+    }
+
+    #[test]
+    fn union_across_a_shared_plane_succeeds_in_both_orders_and_agrees() {
+        // The defect-1 repro, both ways round. `a ∪ b` and `b ∪ a` are the same run over the same
+        // two solids — the operands are put in a canonical order from their own geometry before
+        // anything else happens — so they succeed together and agree on every face and every loop.
+        let a = box_at(Vec3::ZERO, Vec3::new(2.0, 2.0, 1.0));
+        let b = box_at(Vec3::new(1.0, 0.0, 1.0), Vec3::new(3.0, 2.0, 2.0));
+        let (Ok(x), Ok(y)) = (boolean(&a, &b, Bool3::Union), boolean(&b, &a, Bool3::Union)) else {
+            panic!("the union of two blocks sharing half a face must succeed in both orders");
+        };
+        assert_eq!(x.faces, y.faces, "the two orders disagree about a loop");
+        assert_eq!(x.volume().to_bits(), y.volume().to_bits(), "the two orders disagree about the volume");
+        assert_eq!(x.faces.len(), 10, "an L-shaped prism has 10 faces");
     }
 
     #[test]

@@ -584,3 +584,41 @@ Also worth noting: the GitHub logs API returns **403 for this account** (`Must h
 so job logs cannot be read from here. Only the job-level pass/fail list is visible. To see an error
 message, reproduce it locally on the crate in question — which is exactly what the local terminal is
 still for when CI cannot be interrogated.
+
+### RESUME HERE — `crates/solid` does not compile as of this commit
+
+Three compile errors, all in agent work from the free-model wave. **Fix these first; nothing else in
+the kernel can be measured until it compiles.**
+
+```
+error[E0499]: cannot borrow `faces` as mutable more than once at a time
+   --> crates/solid/src/solid.rs:785:20
+error[E0716]: temporary value dropped while borrowed
+   --> crates/solid/src/solid.rs:795:25
+error[E0507]: cannot move out of a shared reference
+   --> crates/solid/src/step.rs:962:40
+error: could not compile `cadcraft-solid` (lib test) due to 3 previous errors
+```
+
+The first two are in `weld_edges` (`solid.rs`), from the KER-BOOL-004 rewrite that resolves corner
+identity by proximity over the 26 neighbours of a `2*tol` lattice. The third is in `step.rs`'s test
+parser (`let Some(&(ref kind, outer)) = g.bounds_of(face).first()` — `kind` is a `String` and cannot
+be moved out of a shared reference; borrow it).
+
+### The union agent's finding, which is worth acting on
+
+It reported that **KER-BOOL-002 and KER-BOOL-003 are already fixed** in the current code, and gave
+the mechanism rather than an assurance: the rule emits `difference(&sa,&sb)` on `p` and the mirror as
+`Face::new(p, back).flipped()`, and `flipped` is `retargeted(p.flipped())` **plus `reverse_regions`**
+— the remap alone leaves the loop clockwise about its own normal, so the shared edge is traversed
+twice the same way and `orient_faces` cannot repair it because it probes the normal, never the loop.
+It also says order-independence now comes from `operand_key`, which orders the two operands by a key
+read off their own geometry, making `union(a,b)` and `union(b,a)` the same run.
+
+**Verify this once the crate compiles** rather than trusting it. If true, it means `KER-BOOL-002/003`
+move to `INTEGRATED` and the remaining failure is elsewhere.
+
+It also corrected a number everyone had been repeating: `union(box(0,0,0)-(2,2,1), box(1,0,1)-(3,2,2))`
+has volume **8**, not 12 — two 2×2×1 blocks are 4+4. The bounding box is 3×2×2 = 12, but the two
+missing 1×2×1 corners are not material. `tests/property.rs` asserts 12 and will fail whatever the
+kernel does; that assertion is wrong and `property.rs` is not the union agent's file to fix.
