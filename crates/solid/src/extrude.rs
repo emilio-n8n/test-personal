@@ -245,7 +245,9 @@ fn turn_dir(d: Vec3, axis: Vec3, theta: f64) -> Vec3 {
 /// A non-positive `t` is the identity, and `turn_dir` already short-circuits it; the start cap is
 /// the profile in its own plane and gets the plane itself back, bit for bit.
 fn turned_plane(plane: &Plane, axis: Vec3, t: f64) -> Result<Plane, SolidError> {
-    if t <= 0.0 { return Ok(*plane); }
+    if t <= 0.0 {
+        return Ok(*plane);
+    }
     Plane::with_u(plane.origin, turn_dir(plane.normal, axis, t), turn_dir(plane.u, axis, t))
 }
 

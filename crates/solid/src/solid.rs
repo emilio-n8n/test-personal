@@ -755,7 +755,11 @@ mod weld_tests {
         // the origin and the two copies really do straddle a cell.
         let s = Solid::from_faces(faces).unwrap_or_default();
         assert!(s.bounds().min.near(Vec3::ZERO, 1e-12), "nothing moved below the origin, so the bound still is: {:?}", s.bounds().min);
-        assert_ne!(vkey(Vec3::new(half, 0.0, 0.0), Vec3::ZERO, tol), vkey(Vec3::ZERO, Vec3::ZERO, tol), "the two copies must land in different cells or this test says nothing");
+        assert_ne!(
+            vkey(Vec3::new(half, 0.0, 0.0), Vec3::ZERO, tol),
+            vkey(Vec3::ZERO, Vec3::ZERO, tol),
+            "the two copies must land in different cells or this test says nothing"
+        );
         match s.validate() {
             Ok(()) => {}
             Err(e) => panic!("a corner {half} from its twin is still one corner: {e}"),
@@ -777,13 +781,17 @@ mod weld_tests {
         if !move_loop_vertex(&mut faces[y0], at, Vec3::new(half, 0.0, 0.0)) {
             return;
         }
-        assert_ne!(vkey(Vec3::new(half, 0.0, 0.0), Vec3::ZERO, tol), vkey(Vec3::ZERO, Vec3::ZERO, tol), "the corner has to straddle a cell or this test says nothing");
+        assert_ne!(
+            vkey(Vec3::new(half, 0.0, 0.0), Vec3::ZERO, tol),
+            vkey(Vec3::ZERO, Vec3::ZERO, tol),
+            "the corner has to straddle a cell or this test says nothing"
+        );
         // Moved face last, so the corner it lost is registered first and is therefore the number
         // the other two faces keep. The pass answers with the *first* corner within tolerance, and
         // which one that is must not be down to the order a builder emitted its faces in — so the
         // test pins the order down rather than inheriting it.
-        faces.push(faces.remove(y0));
-
+        let moved = faces.remove(y0);
+        faces.push(moved);
         weld_edges(&mut faces, tol);
         // One number for the corner, in the face that was moved and in the two that were not. They
         // are not bit-identical — each face reads its own local copy back through its own frame —
@@ -792,7 +800,8 @@ mod weld_tests {
         let after = Solid::from_faces(faces).unwrap_or_default();
         let mut corner: Option<Vec3> = None;
         for f in &after.faces {
-            let found = f.vertices().iter().find(|v| v.len() <= tol);
+            let verts = f.vertices();
+            let found = verts.iter().find(|v| v.len() <= tol);
             let Some(first) = corner else {
                 if let Some(v) = found {
                     corner = Some(*v);
@@ -800,7 +809,11 @@ mod weld_tests {
                 continue;
             };
             let Some(v) = found else { continue };
-            assert!((*v - first).len() <= tol * 1e-3, "a face kept its own copy of the corner, {} from its neighbour's: {first:?} vs {v:?}", (*v - first).len());
+            assert!(
+                (*v - first).len() <= tol * 1e-3,
+                "a face kept its own copy of the corner, {} from its neighbour's: {first:?} vs {v:?}",
+                (*v - first).len()
+            );
         }
         assert!(corner.is_some(), "no face holds the corner at all");
         // The welded cube is the cube: the weld moves a *number*, never a point, so the only way it
@@ -887,7 +900,11 @@ mod weld_tests {
         if !move_loop_vertex(&mut faces[y0], at, Vec3::new(half, 0.0, 0.0)) {
             return;
         }
-        assert_ne!(vkey(Vec3::new(half, 0.0, 0.0), Vec3::ZERO, tol), vkey(Vec3::ZERO, Vec3::ZERO, tol), "the corner must straddle a cell or this test says nothing");
+        assert_ne!(
+            vkey(Vec3::new(half, 0.0, 0.0), Vec3::ZERO, tol),
+            vkey(Vec3::ZERO, Vec3::ZERO, tol),
+            "the corner must straddle a cell or this test says nothing"
+        );
 
         let baseline_volume = Solid::from_faces(faces.clone()).unwrap_or_default().volume();
         let baseline_area: f64 = faces.iter().map(|f| f.area()).sum();

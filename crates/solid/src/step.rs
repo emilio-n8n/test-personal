@@ -959,9 +959,13 @@ mod tests {
             // a second one at the same place. Exact equality is the right comparison here and not
             // merely a convenient one: both numbers came out of the same `f64` through the same
             // formatter, so any difference at all would be a real one.
-            let Some(&(kind, outer)) = g.bounds_of(face).first() else {
+            // The bounds vector is a temporary: binding it first keeps it alive for the borrow.
+            let bounds = g.bounds_of(face);
+            let Some(bound) = bounds.first() else {
                 panic!("#{face} has no bound");
             };
+            let kind = &bound.0;
+            let outer = bound.1;
             assert_eq!(kind, "FACE_OUTER_BOUND", "a cube's only bound is an outer one");
             let Some(&poly) = g.out.get(&outer).and_then(|refs| refs.first()) else {
                 panic!("#{outer} has no loop");
