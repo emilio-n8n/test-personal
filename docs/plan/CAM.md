@@ -1328,8 +1328,8 @@ and the least safe thing to build.
 - **Risk:** the reader and the writer share the author's misunderstanding. Fallback: `CAM-POST-009`'s independent simulator, and `CAM-POST-022`'s differential test between dialects.
 
 ### CAM-SIM-019 — Block-level parsing with a real modal machine
-- **State:** BLOCKED
-- **Depends on:** CAM-POST-006
+- **State:** READY
+- **Depends on:** — (the parser is the foundation of the reader; `CAM-POST-006` consumes **this**, not the other way round)
 - **Files:** `crates/cam/src/gcode/parse.rs` (owner CAM)
 - **Contract:** `pub struct GBlock { pub line: usize, pub words: Vec<GWord>, pub comment: String }` and `pub enum GWord { G(usize), M(usize), X(f64), Y(f64), Z(f64), I(f64), J(f64), K(f64), R(f64), F(f64), S(f64), T(u8), N(u32), Paren(String) }` and `pub fn parse(text: &str) -> Result<Vec<GBlock>, CamError>;`
 - **Behaviour:** A real reader, not a regex: it tracks line numbers, distinguishes a comment from a word, rejects a malformed number rather than defaulting it to 0, and preserves the block for error messages. Modal state lives in `CAM-SIM-018`'s replayer, not in the parser, so the parser stays a pure function of its input.
@@ -1458,7 +1458,7 @@ and the least safe thing to build.
 
 ### CAM-POST-006 — The G-code reader
 - **State:** READY
-- **Depends on:** CAM-POST-002, CAM-SIM-019
+- **Depends on:** CAM-SIM-019
 - **Files:** `crates/cam/src/gcode/mod.rs` (owner CAM)
 - **Contract:** `pub fn read(text: &str) -> Result<ParsedProgram, CamError>;` and `pub fn read_moves(p: &ParsedProgram) -> Result<Toolpath, CamError>;`
 - **Behaviour:** Reads a program, replays its modal state and reconstructs the `Toolpath` it came from. This is the **first gate** for every dialect: our own output must come back as the same moves. It is also what lets a user import a program someone else wrote — and the same checks apply to that.
@@ -1838,13 +1838,15 @@ and the least safe thing to build.
 
 | Epic | Tasks | Ready now | Blocked on KER / cross-domain | Backlog |
 |---|---|---|---|---|
-| `CAM-TOOL` | 22 | 16 | 2 | 4 |
-| `CAM-MACH` | 18 | 14 | 2 | 2 |
-| `CAM-PATH` | 30 | 8 | 17 | 5 |
-| `CAM-SIM` | 22 | 12 | 8 | 2 |
-| `CAM-POST` | 24 | 14 | 10 | 0 |
-| `CAM-ADD` | 14 | 6 | 7 | 1 |
-| **total** | **130** | **70** | **46** | **14** |
+| `CAM-TOOL` | 22 | 17 | 1 | 4 |
+| `CAM-MACH` | 18 | 15 | 1 | 2 |
+| `CAM-PATH` | 30 | 18 | 12 | 0 |
+| `CAM-SIM` | 22 | 15 | 6 | 1 |
+| `CAM-POST` | 24 | 17 | 7 | 0 |
+| `CAM-ADD` | 14 | 9 | 4 | 1 |
+| **total** | **130** | **91** | **31** | **8** |
+
+(The state column of each task above is the authoritative count; this table is its sum.)
 
 ### The blockers, in the order they should be cleared
 

@@ -418,3 +418,22 @@ puts it squarely behind the NURBS work in `KER-SRF`.
 
 None of this is code. None of it is validated. It is a work breakdown with 952 entries, each with
 state, dependencies, owned files, a contract, refusals, tests, acceptance and risk.
+
+### 72 3D tests had never been compiled — my omission, now fixed
+
+`REN.md`'s writer found it: `crates/render/src/picking.rs`, `crates/ui-egui/src/{viewport3,
+viewport_state}.rs` and `crates/ui-egui/src/panels3/**` existed on disk but were **never declared
+as modules**, because I had forbidden those agents from touching `lib.rs` — correctly, they did not
+own it — and then never added the lines myself. 72 test functions had never been compiled.
+
+`picking` is now declared and compiling: **render 100 → 116 passed, 1 failed** after fixing two
+compile errors (a `&Ray`/`Ray` mismatch and `Hit::is_finite` used where a closure is required).
+
+Its one remaining failure is a **test-math bug, not a kernel bug**: `a_pixel_round_trips_through_the_projection`
+unprojects with `pr[0][0] * v[0] / depth`, which is not an inverse projection, and gets
+`(-2.9e-17, -3.9e-17)` where it expects `(320, 240)`. Left failing rather than papered over with a
+looser tolerance; whoever writes `REN-GPU` needs a real inverse matrix and this test becomes its
+specification.
+
+`viewport3` / `viewport_state` / `panels3` are still undeclared and still uncompiled — that is the
+next piece of work, and it needs `ui-egui`'s module list edited, which is mine to do.

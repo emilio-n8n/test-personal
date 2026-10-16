@@ -21,6 +21,7 @@ mod mline;
 mod outline;
 pub mod paper;
 pub mod pen;
+pub mod picking;
 mod plotstyle;
 mod point;
 pub mod raster;

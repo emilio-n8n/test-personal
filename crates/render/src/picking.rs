@@ -193,7 +193,7 @@ pub fn ray_mesh_intersection(ray: &Ray, mesh: &Mesh, solid: &Solid) -> Option<Hi
     let ray = ray.unit()?;
     let mut best: Option<(f64, Vec3, Vec3)> = None;
     for tri in mesh.triangles() {
-        let Some((t, point, normal)) = ray_triangle(ray, &tri) else { continue };
+        let Some((t, point, normal)) = ray_triangle(&ray, &tri) else { continue };
         if best.is_some_and(|(bt, _, _)| bt <= t) {
             continue;
         }
@@ -486,8 +486,8 @@ mod tests {
         assert!(Ray { origin: Vec3::ZERO, dir: Vec3::ZERO }.unit().is_none());
         // And nothing non-finite ever escapes either path.
         for r in [Ray { origin: Vec3::ZERO, dir: Vec3::ZERO }, Ray { origin: Vec3::new(f64::NAN, 0.0, 0.0), dir: Vec3::X }] {
-            assert!(ray_solid_intersection(&r, &box_).is_none_or(Hit::is_finite), "{r:?}");
-            assert!(ray_mesh_intersection(&r, &mesh, &box_).is_none_or(Hit::is_finite), "{r:?}");
+            assert!(ray_solid_intersection(&r, &box_).is_none_or(|h| h.is_finite()), "{r:?}");
+            assert!(ray_mesh_intersection(&r, &mesh, &box_).is_none_or(|h| h.is_finite()), "{r:?}");
         }
     }
 
