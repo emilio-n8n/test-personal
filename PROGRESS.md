@@ -463,3 +463,76 @@ missing, which the crate's own i18n test caught. `uk.tsv` now has them and **ui-
 
 A warning that matters more than the errors: **the i18n test only failed because I ran the suite.**
 Nothing in the pipeline would have told me those four commands shipped untranslated.
+
+---
+
+## 2026-10-16 — HANDOFF: the CI era begins
+
+**Read this section first if you are resuming.** The working method changed completely and the
+old sections below describe how it used to work.
+
+### What changed
+
+The repository is now also pushed to **https://github.com/emilio-n8n/test-personal** (remote `mine`),
+which the owner controls and can push to. `storytold/cadcraft` (remote `origin`) is somebody else's
+project and returns **403** for this account — the work cannot be pushed there.
+
+**GitHub Actions is the compiler now, not this VM.** `.github/workflows/agent-check.yml` runs on
+every push: fmt, clippy `-D warnings`, `cargo check --workspace`, one runner per crate for the 12
+crates with tests, the application shell on its own runner, and the three non-cargo gates
+(`xtask layers`, `xtask assets`, `xtask wasm`).
+
+### The rule that follows from it
+
+**Do not compile locally to verify work.** Push, then read the Actions result. The local terminal is
+for file work and git only. This was the whole point of getting a writable remote: the previous
+bottleneck was that verification was serial on two cores.
+
+### The agent flow, and its one gap
+
+Agents have **no terminal**, so they cannot push. The cycle is:
+
+```
+agents write files  ->  orchestrator commits and pushes  ->  GitHub Actions judges  ->  fix or accept
+```
+
+That means the orchestrator must keep pushing in batches. Nothing an agent writes is durable until
+it is committed and pushed, and nothing is known to compile until CI has run on it.
+
+### Agents currently in flight (all on FREE models, per the owner's budget)
+
+| Agent | Task | Owns |
+|---|---|---|
+| weld | `KER-BOOL-004` cell-straddle in `weld_edges` | `crates/solid/src/solid.rs` |
+| union | `KER-BOOL-002/003` shared plane + order | `crates/solid/src/boolean.rs` |
+| step | `DAT-003` independent-reader failure | `crates/solid/src/step.rs`, `tests/step_interop.rs` |
+| ui | compile the 3 UI modules | `crates/ui-egui/src/{viewport3,viewport_state,panels3/**}` |
+| nurbs | `KER-SRF-001` NURBS curves | new `crates/geom/src/nurbs.rs` |
+| sketch | `SKT-001` constraint-derived sketch | new `crates/model/src/sketch.rs` |
+| asm | `ASM-001/002` components + joints | new `crates/asm/**` |
+
+**Pending orchestrator work when they return:** add the `mod` lines they must not add themselves
+(`crates/geom/src/lib.rs`, `crates/model/src/lib.rs`, `crates/ui-egui/src/lib.rs`) and the crate
+registration for `crates/asm` (root `Cargo.toml` + `xtask/src/layers.rs`), then push and read CI.
+
+### Models
+
+Free models only: `opencode-go/cat-jam-free` and `opencode-go/longcat-2.5-preview-free`. The owner
+has almost no credits; `opencode-go/deepseek-v4.1-flash` is a genuine last resort, not a default.
+`opencode/cat-jam-free` does not exist — the free ones are on the `opencode-go` provider.
+
+### State of the tree at this commit
+
+- `crates/solid`: 82 lib tests passing, 4 failing; property 9/3, property_surface 7/10, fuzz 8/2,
+  corpus 10/3, **step_interop 0/11**
+- `crates/render`: 116 passing, 1 failing (a bug in the test's own unprojection maths)
+- `crates/ui-egui`: 157 passing, 3 modules undeclared because they do not compile
+- Wave 1 is `CODE WRITTEN`, **0 `VALIDATED`**
+- 952 tasks specified in `docs/plan/`, 632 `READY`
+
+### Honest expectation, recorded so nobody is misled later
+
+A Fusion 360-class system is a multi-year, multi-engineer programme. Seven free-model agents and a
+CI pipeline do not change that. What they change is that work can now be *judged* at a rate this VM
+could never achieve. The plan's own weights stand: the kernel is 20 %, and NURBS — the gate on
+assemblies, drawing, simulation and CAM — is not started.
