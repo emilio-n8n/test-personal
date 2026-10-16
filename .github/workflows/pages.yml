@@ -1,0 +1,89 @@
+name: pages
+
+# Deploy the browser build to GitHub Pages.
+#
+# What it publishes: apps/cadcraft-web built with Trunk (Trunk.toml:
+# dist = dist/web, public_url = "./", so every URL is relative and the site
+# works under the Pages sub-path). No server-side code.
+#
+# One-time setup (owner, once per repository):
+#   Settings → Pages → Build and deployment → Source: GitHub Actions.
+# Then every push to the default branch publishes the site
+# (see packaging/web/README-pages.md for the URL and checks).
+#
+# NOTE: the `wasm` gate in agent-check.yml only runs
+# `cargo check --target wasm32-unknown-unknown`; it does NOT prove this full
+# Trunk build (wasm-bindgen, asset hashing, index.html rewriting) works.
+# This workflow is the only CI that builds the real site.
+
+on:
+  push:
+    branches: [main, feature/3d-parametric]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# A newer push wins: cancel the older queued/in-progress deploy.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # Caches cargo registries and the whole target dir, including
+      # target/wasm32-unknown-unknown.
+      - uses: Swatinem/rust-cache@v2
+
+      # Trunk itself is NOT pinned to an exact version here: no Trunk version
+      # is recorded anywhere in this repo (packaging/web/package.sh just says
+      # `cargo install trunk --locked`). `latest` fails loudly on install
+      # rather than silently building wrong; see
+      # docs/agents/questions/Q-plt-trunk-version-pin.md for the open pin
+      # request. When the owner picks a version, set `version:` below to it.
+      - uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+
+      - name: Build the site
+        working-directory: apps/cadcraft-web
+        run: trunk build --release
+
+      - name: Guard the Pages assumptions
+        run: |
+          test -f dist/web/index.html || { echo "error: dist/web/index.html missing; trunk build did not emit the site" >&2; exit 1; }
+          if grep -Eq '(src|href)="/[^/]' dist/web/index.html; then
+            echo "error: dist/web/index.html has root-absolute URLs; it would break under the Pages sub-path" >&2
+            exit 1
+          fi
+          # GitHub Pages runs Jekyll by default, which ignores files and dirs
+          # starting with `_`. The site has none today, but .nojekyll makes
+          # that permanently a non-issue.
+          touch dist/web/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

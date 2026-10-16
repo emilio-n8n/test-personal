@@ -559,7 +559,7 @@ impl Sketch {
             };
             for id in refs {
                 if !self.point_exists(id) {
-                    return Err(SketchError::NoSuchPoint { name: constraint_name(c).to_string(), id });
+                    return Err(SketchError::NoSuchPoint { name: constraint_name(c), id });
                 }
             }
         }
@@ -590,11 +590,79 @@ impl Sketch {
         let layout = build_layout(&self.entities);
         let x0 = build_vector(&self.entities, &layout);
 
-        // All parameters are free
-        let free: Vec<usize> = (0..layout.total).collect();
-        let weights = vec![1.0; layout.total];
+        // Decision: a directional constraint on a zero-length line is REFUSED, not
+        // satisfied. A segment with no length has no direction, so "this line is
+        // horizontal" on coincident points would be trivially true — an equation that adds
+        // nothing while claiming to constrain the sketch, and one the solver can never
+        // report as violated. `Distance` and `Equal` keep their meaning between coincident
+        // points, so they stay allowed. The tolerance scales with the sketch's extent: a
+        // segment shorter than 1e-9 of it has no usable direction.
+        let scale = x0.iter().fold(1.0f64, |m, v| m.max(v.abs()));
+        let eps = 1e-9 * scale.max(1e-12);
+        for c in &self.constraints {
+            let segs: &[(PointId, PointId)] = match c {
+                SketchConstraint::Horizontal { a, b, .. } | SketchConstraint::Vertical { a, b, .. } => &[(*a, *b)],
+                SketchConstraint::Parallel { a, b, c: d, d: e, .. }
+                | SketchConstraint::Perpendicular { a, b, c: d, d: e, .. }
+                | SketchConstraint::Angle { a, b, c: d, d: e, .. } => &[(*a, *b), (*d, *e)],
+                SketchConstraint::Tangent { line_a, line_b, .. } => &[(*line_a, *line_b)],
+                _ => &[],
+            };
+            for (a, b) in segs {
+                let Some(pa) = point_pos(&x0, &layout, &self.entities, *a) else {
+                    return Err(SketchError::NoSuchPoint { name: constraint_name(c), id: *a });
+                };
+                let Some(pb) = point_pos(&x0, &layout, &self.entities, *b) else {
+                    return Err(SketchError::NoSuchPoint { name: constraint_name(c), id: *b });
+                };
+                if pa.dist(pb) <= eps {
+                    return Err(SketchError::ZeroLengthLine);
+                }
+            }
+        }
 
-        // Solve
+        // Free parameters: everything moves, except radii locked by tangency (see the
+        // `Tangent` variant's doc — a tangent's correction belongs to the line and the
+        // centre, not to the radius, unless a `Radius` dimension drives that circle).
+        let tangent_locked: HashSet<usize> = self
+            .constraints
+            .iter()
+            .filter_map(|c| match c {
+                SketchConstraint::Tangent { circle, .. } => circle_radius_index(&layout, &self.entities, *circle),
+                _ => None,
+            })
+            .collect();
+        let radius_driven: HashSet<usize> = self
+            .constraints
+            .iter()
+            .filter_map(|c| match c {
+                SketchConstraint::Radius { circle, .. } => circle_radius_index(&layout, &self.entities, *circle),
+                _ => None,
+            })
+            .collect();
+        let mut free: Vec<usize> = (0..layout.total).filter(|j| !tangent_locked.contains(j) || radius_driven.contains(j)).collect();
+        if free.is_empty() && layout.total > 0 {
+            // The solver reads `free: []` as "everything may move", which would unlock the
+            // radii; an index past the end of the vector is ignored, so it expresses
+            // "nothing may move" — the honest answer when every parameter is locked.
+            free.push(layout.total);
+        }
+
+        // Weights: the sketch's first point is its anchor (see `ANCHOR_WEIGHT`); all other
+        // parameters move at unit weight.
+        let anchor: Option<usize> = self.entities.iter().enumerate().find_map(|(i, e)| match e {
+            SketchEntity::Point { .. } => layout.offsets.get(i).map(|(off, _)| *off),
+            _ => None,
+        });
+        let weights: Vec<f64> = (0..layout.total)
+            .map(|j| match anchor {
+                Some(a) if j == a || j == a + 1 => ANCHOR_WEIGHT,
+                _ => 1.0,
+            })
+            .collect();
+
+        // Solve. The tolerance scales with the sketch's extent — a fixed 1e-12 sits below
+        // the coordinate noise of a large drawing.
         let tol = scale_tol(&x0);
         let f = |x: &[f64], out: &mut Vec<f64>| {
             // This closure cannot return an error, so we skip constraints that fail.
@@ -603,8 +671,8 @@ impl Sketch {
                 let _ = eval_constraint(c, x, &layout, &self.entities, &self.parameters, out);
             }
         };
-
-        let (x, converged, iterations, residual) = lm_solve(&f, &x0, &free, &weights, tol, 200);
+        let opts = Options { tol, free: free.clone(), weights: weights.clone(), ..Options::default() };
+        let Report { x, converged, iterations, residual } = solve_least_squares(&f, &x0, &opts);
 
         // Check for redundancy: compute the rank of the Jacobian
         let rows: usize = self.constraints.iter().map(|c| constraint_rows(c)).sum();
@@ -629,7 +697,7 @@ impl Sketch {
                 let jac_skip = jacobian(&f_skip, &x, &free, rows_skip);
                 let r_skip = rank(&jac_skip, rows_skip, nf);
                 if r_skip == r {
-                    redundant.push(constraint_name(c).to_string());
+                    redundant.push(constraint_name(c));
                 }
             }
         }
@@ -637,6 +705,7 @@ impl Sketch {
         // Find conflicting constraints: those whose removal makes the system solvable
         let mut conflicting = Vec::new();
         if !converged && self.constraints.len() <= 48 {
+            let skip_opts = Options { free, weights, ..opts };
             for (i, c) in self.constraints.iter().enumerate() {
                 let f_skip = |x: &[f64], out: &mut Vec<f64>| {
                     for (j, c2) in self.constraints.iter().enumerate() {
@@ -645,9 +714,8 @@ impl Sketch {
                         }
                     }
                 };
-                let (_, converged_skip, _, _) = lm_solve(&f_skip, &x0, &free, &weights, tol, 200);
-                if converged_skip {
-                    conflicting.push(constraint_name(c).to_string());
+                if solve_least_squares(&f_skip, &x0, &skip_opts).converged {
+                    conflicting.push(constraint_name(c));
                 }
             }
         }
@@ -669,19 +737,26 @@ impl Sketch {
     }
 }
 
-/// Get the display name of a constraint.
-fn constraint_name(c: &SketchConstraint) -> &'static str {
-    match c {
-        SketchConstraint::Coincident { .. } => "Coincident",
-        SketchConstraint::Horizontal { .. } => "Horizontal",
-        SketchConstraint::Vertical { .. } => "Vertical",
-        SketchConstraint::Parallel { .. } => "Parallel",
-        SketchConstraint::Perpendicular { .. } => "Perpendicular",
-        SketchConstraint::Tangent { .. } => "Tangent",
-        SketchConstraint::Equal { .. } => "Equal",
-        SketchConstraint::Distance { .. } => "Distance",
-        SketchConstraint::Radius { .. } => "Radius",
-        SketchConstraint::Angle { .. } => "Angle",
+/// The display name of a constraint: its own `name` when it has one, its kind otherwise.
+/// Reports (`SolveReport::redundant`, `SolveReport::conflicting`) and errors carry this, so a
+/// caller — and a test — can match the very constraint the user named.
+fn constraint_name(c: &SketchConstraint) -> String {
+    let (name, kind): (&String, &str) = match c {
+        SketchConstraint::Coincident { name, .. } => (name, "Coincident"),
+        SketchConstraint::Horizontal { name, .. } => (name, "Horizontal"),
+        SketchConstraint::Vertical { name, .. } => (name, "Vertical"),
+        SketchConstraint::Parallel { name, .. } => (name, "Parallel"),
+        SketchConstraint::Perpendicular { name, .. } => (name, "Perpendicular"),
+        SketchConstraint::Tangent { name, .. } => (name, "Tangent"),
+        SketchConstraint::Equal { name, .. } => (name, "Equal"),
+        SketchConstraint::Distance { name, .. } => (name, "Distance"),
+        SketchConstraint::Radius { name, .. } => (name, "Radius"),
+        SketchConstraint::Angle { name, .. } => (name, "Angle"),
+    };
+    if name.is_empty() {
+        kind.to_string()
+    } else {
+        name.clone()
     }
 }
 
@@ -862,10 +937,12 @@ mod tests {
 }
 
 /// Helper trait for tests: extract the position from a Point entity.
+#[cfg(test)]
 trait PointPos {
     fn point_pos(&self) -> Option<Vec2>;
 }
 
+#[cfg(test)]
 impl PointPos for SketchEntity {
     fn point_pos(&self) -> Option<Vec2> {
         match self {
