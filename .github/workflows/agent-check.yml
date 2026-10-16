@@ -1,0 +1,49 @@
+name: agent-check
+
+# The compiler service. An agent writes files and pushes its own branch; this
+# workflow compiles and tests it, so a broken change is reported in minutes
+# without spending one second of the orchestrator's time or this VM's CPU.
+#
+# Runs on a public repository the orchestrator owns, so the runners are
+# GitHub's -- not the two cores of the local machine. A matrix means N crates
+# are checked in parallel.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # The kernel and its dependents, split so each crate gets its own runner.
+  # Add a crate here the moment it has tests of its own.
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [cadcraft-geom, cadcraft-solid, cadcraft-model, cadcraft-render]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt -p ${{ matrix.crate }} -- --check
+      - run: cargo clippy -p ${{ matrix.crate }} --all-targets -- -D warnings
+      - run: cargo test -p ${{ matrix.crate }}
+
+  # The 2D application. Heavier, so it gets its own runner and is not gated
+  # by the 3D work.
+  app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p cadcraft-constraints -p cadcraft-doc -p cadcraft-io -p cadcraft-mcp
+
+  # The whole workspace, as a single judgement.
+  workspace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --workspace --all-targets
