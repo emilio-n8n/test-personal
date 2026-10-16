@@ -614,7 +614,7 @@ fn the_corpus_closed_forms_agree_with_independent_derivations() {
     // The plate with a hole, as a subtraction of surfaces.
     let plate_a = prism_area;
     let hole_a = 2.0 * (8.0 * 6.0) + 2.0 * (8.0 + 6.0) * 6.0;
-    assert!(near(plate_a - hole_a, 936.0, 1e-12), "removing a hole's surfaces leaves {plate_a - hole_a}, the corpus says 936");
+    assert!(near(plate_a - hole_a, 936.0, 1e-12), "removing a hole's surfaces leaves {}, the corpus says 936", plate_a - hole_a);
     assert!(near(plate_a - hole_a, 936.0, 1e-12), "864 − {} = 936", hole_a);
 
     // The L's area, as two rectangles rather than a shoelace.

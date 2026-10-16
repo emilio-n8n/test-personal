@@ -129,7 +129,7 @@ impl<'a> Reader<'a> {
     }
 
     fn skip_space(&mut self) {
-        while self.byte(self.at).is_some_and(u8::is_ascii_whitespace) {
+        while self.byte(self.at).is_some_and(|b| b.is_ascii_whitespace()) {
             self.at += 1;
         }
     }
@@ -158,7 +158,7 @@ impl<'a> Reader<'a> {
     fn digits(&mut self) -> usize {
         self.skip_space();
         let start = self.at;
-        while self.byte(self.at).is_some_and(u8::is_ascii_digit) {
+        while self.byte(self.at).is_some_and(|b| b.is_ascii_digit()) {
             self.at += 1;
         }
         self.text[start..self.at].parse::<usize>().unwrap_or(0)
@@ -178,7 +178,7 @@ impl<'a> Reader<'a> {
             if matches!(self.byte(self.at), Some(b'+') | Some(b'-')) {
                 self.at += 1;
             }
-            while self.byte(self.at).is_some_and(u8::is_ascii_digit) {
+            while self.byte(self.at).is_some_and(|b| b.is_ascii_digit()) {
                 self.at += 1;
             }
         }
@@ -511,7 +511,7 @@ impl Part21 {
         }
     }
 
-    fn as_list(&self, arg: &Arg, what: &str) -> &[Arg] {
+    fn as_list<'a>(&self, arg: &'a Arg, what: &str) -> &'a [Arg] {
         match arg {
             Arg::List(v) => v.as_slice(),
             other => panic!("{what} is {other:?}, and a reader would want a list there"),
@@ -721,7 +721,7 @@ fn audit(solid: &Solid, text: &str) -> Audit {
             let poly = file.as_ref(file.arg(bound_args, 1), "a bound's loop");
             let poly_args = file.args_of(poly, "POLY_LOOP");
             let verts: Vec<usize> =
-                file.as_list(self.arg(poly_args, 1), "a POLY_LOOP's polygon").iter().map(|a| file.as_ref(a, "a point of a polygon")).collect();
+                file.as_list(file.arg(poly_args, 1), "a POLY_LOOP's polygon").iter().map(|a| file.as_ref(a, "a point of a polygon")).collect();
             let expected_len = kernel_loops.get(bi).copied().unwrap_or(0);
             assert_eq!(verts.len(), expected_len, "#{poly} has {} vertices, the kernel's loop {bi} of face {fi} has {expected_len}", verts.len());
             assert!(verts.len() >= 3, "#{poly} has {} vertices, and a polygon needs three", verts.len());

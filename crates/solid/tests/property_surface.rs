@@ -35,8 +35,8 @@
 //! terminal and has never been compiled or run; see the report that came with it.
 
 use cadcraft_solid::{
-    Bool3, Edge, EdgeRef, Face, Mesh, Plane, Region, Regions, Solid, SolidError, Triangle, Vec2, Vec3, boolean, chamfer, extrude, fillet,
-    limits, mass_properties, mesh_from_solid, reverse_regions, support, tolerance_for,
+    Bool3, Edge, EdgeRef, Face, Mesh, Plane, Region, Regions, Solid, SolidError, Triangle, Vec2, Vec3, boolean, chamfer, extrude, fillet, limits,
+    mass_properties, mesh_from_solid, reverse_regions, support, tolerance_for,
 };
 
 // ---------- generator ----------
@@ -77,7 +77,7 @@ impl Rng {
 // ---------- comparison helpers ----------
 
 /// Relative closeness with a floor, so zero-scale cases stay meaningful.
-fn near(a: f64, b: f64, rel: f64) -> bool {
+fn near_eq(a: f64, b: f64, rel: f64) -> bool {
     (a - b).abs() <= rel * a.abs().max(b.abs()).max(1e-300)
 }
 
@@ -189,7 +189,7 @@ fn the_centre_of_mass_of_a_symmetric_solid_is_where_symmetry_says() {
             );
             // And the volume matches the polygonal prism formula, which is not the disc's area.
             assert!(
-                near(m.volume, polygon_area(n, 2.5) * 4.0, 1e-12),
+                near_eq(m.volume, polygon_area(n, 2.5) * 4.0, 1e-12),
                 "{n}-gon: volume {} against the prism formula {}",
                 m.volume,
                 polygon_area(n, 2.5) * 4.0
@@ -214,15 +214,8 @@ fn the_centre_of_mass_of_a_symmetric_solid_is_where_symmetry_says() {
 
     // (d) An L-profile: not symmetric at all, so the centroid is a real calculation. The polygon
     //     centroid of a closed loop is `c = (1/(6A)) Σ (p_i + p_{i+1})(p_i × p_{i+1})`.
-    let l = vec![
-        Vec2::new(0.0, 0.0),
-        Vec2::new(10.0, 0.0),
-        Vec2::new(10.0, 3.0),
-        Vec2::new(3.0, 3.0),
-        Vec2::new(3.0, 10.0),
-        Vec2::new(0.0, 10.0),
-    ];
-    let bracket = must(extrude(&Region::new(l).to_regions(), &Plane::xy(0.0), 4.0), "extrude L", "bracket");
+    let l = vec![Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), Vec2::new(10.0, 3.0), Vec2::new(3.0, 3.0), Vec2::new(3.0, 10.0), Vec2::new(0.0, 10.0)];
+    let bracket = must(extrude(&Region::new(l.clone()).to_regions(), &Plane::xy(0.0), 4.0), "extrude L", "bracket");
     let (mut cx, mut cy, mut a2) = (0.0, 0.0, 0.0);
     for i in 0..l.len() {
         let (p, q) = (l[i], l[(i + 1) % l.len()]);
@@ -232,7 +225,7 @@ fn the_centre_of_mass_of_a_symmetric_solid_is_where_symmetry_says() {
         cy += (p.y + q.y) * f;
     }
     let (c2d, area) = (Vec2::new(cx / (3.0 * a2), cy / (3.0 * a2)), a2 * 0.5);
-    assert!(near(area, 51.0, 1e-12), "the L profile is 51 by the shoelace, got {area}");
+    assert!(near_eq(area, 51.0, 1e-12), "the L profile is 51 by the shoelace, got {area}");
     let m = must(mass_properties(&bracket), "mass_properties", "bracket");
     assert!(m.centroid.near(Vec3::new(c2d.x, c2d.y, 2.0), 1e-12), "L centroid {:?}, the polygon formula says {c2d:?} at mid-height", m.centroid);
 }
@@ -255,7 +248,7 @@ fn the_centroid_translates_with_the_solid_and_the_area_does_not_change() {
         let at = format!("{}\n    size = {size:?}\n    offset = {offset:?}", tag(seed, case));
         let a = must(mass_properties(&at_origin), "mass_properties (at the origin)", &at);
         let b = must(mass_properties(&moved), "mass_properties (moved)", &at);
-        assert!(near(a.area, b.area, 1e-12), "{at}: the area moved with the box: {} vs {}", a.area, b.area);
+        assert!(near_eq(a.area, b.area, 1e-12), "{at}: the area moved with the box: {} vs {}", a.area, b.area);
         assert!(
             b.centroid.near(a.centroid + offset, 1e-9 * size.len()),
             "{at}: the centroid did not translate with the box: {:?} vs {:?}",
@@ -263,7 +256,7 @@ fn the_centroid_translates_with_the_solid_and_the_area_does_not_change() {
             a.centroid + offset
         );
         // And the volume, which is the one number that must not depend on where the body sits.
-        assert!(near(a.volume, b.volume, 1e-12), "{at}: volume {} vs {}", a.volume, b.volume);
+        assert!(near_eq(a.volume, b.volume, 1e-12), "{at}: volume {} vs {}", a.volume, b.volume);
     }
 }
 
@@ -339,10 +332,7 @@ fn shift(t: Tensor, mass: f64, c: Vec3) -> Tensor {
 /// `I_xx = m (b² + c²) / 12`, and no products of inertia at all.
 fn box_inertia(a: f64, b: f64, c: f64) -> (f64, Tensor) {
     let m = a * b * c;
-    (
-        m,
-        [m * (b * b + c * c) / 12.0, m * (a * a + c * c) / 12.0, m * (a * a + b * b) / 12.0, 0.0, 0.0, 0.0],
-    )
+    (m, [m * (b * b + c * c) / 12.0, m * (a * a + c * c) / 12.0, m * (a * a + b * b) / 12.0, 0.0, 0.0, 0.0])
 }
 
 /// The kernel's centroid is where the parallel-axis theorem says it has to be.
@@ -368,7 +358,7 @@ fn the_inertia_tensor_agrees_with_the_centroid_the_kernel_reports() {
         let want = m.centroid;
         let at_o = {
             let (v, f, t) = integrate(&mesh, Vec3::ZERO);
-            assert!(near(v, m.volume, 1e-12), "the independent volume {} is not the kernel's {}", v, m.volume);
+            assert!(near_eq(v, m.volume, 1e-12), "the independent volume {} is not the kernel's {}", v, m.volume);
             assert!(((f / v).len() < 1e-9), "the independent centroid is not the kernel's");
             t
         };
@@ -378,7 +368,7 @@ fn the_inertia_tensor_agrees_with_the_centroid_the_kernel_reports() {
         let predicted = shift(at_c, m.volume, want);
         for (i, name) in ["Ixx", "Iyy", "Izz", "Ixy", "Ixz", "Iyz"].into_iter().enumerate() {
             assert!(
-                near(at_o[i], predicted[i], REL),
+                near_eq(at_o[i], predicted[i], REL),
                 "a {a} x {b} x {c} box: {name} about the origin is {} but the parallel-axis theorem says {} (centroid {want:?})",
                 at_o[i],
                 predicted[i]
@@ -387,9 +377,9 @@ fn the_inertia_tensor_agrees_with_the_centroid_the_kernel_reports() {
 
         // And the closed form, about the centroid, where the off-diagonal terms must vanish.
         let (mass, closed) = box_inertia(a, b, c);
-        assert!(near(mass, m.volume, 1e-12), "density 1 means the mass is the volume");
+        assert!(near_eq(mass, m.volume, 1e-12), "density 1 means the mass is the volume");
         for (i, name) in ["Ixx", "Iyy", "Izz", "Ixy", "Ixz", "Iyz"].into_iter().enumerate() {
-            assert!(near(at_c[i], closed[i], REL), "a {a} x {b} x {c} box: {name} is {} against the closed form {}", at_c[i], closed[i]);
+            assert!(near_eq(at_c[i], closed[i], REL), "a {a} x {b} x {c} box: {name} is {} against the closed form {}", at_c[i], closed[i]);
         }
         checked += 1;
     }
@@ -427,7 +417,7 @@ fn the_inertia_tensor_agrees_with_the_centroid_the_kernel_reports() {
         let at_c = integrate(&mesh, m.centroid).2;
         let predicted = shift(at_c, m.volume, m.centroid);
         for (k, name) in ["Ixx", "Iyy", "Izz", "Ixy", "Ixz", "Iyz"].into_iter().enumerate() {
-            assert!(near(at_o[k], predicted[k], REL), "{at}: {name} about the origin is {} against {}", at_o[k], predicted[k]);
+            assert!(near_eq(at_o[k], predicted[k], REL), "{at}: {name} about the origin is {} against {}", at_o[k], predicted[k]);
         }
         // A symmetric-about-nothing part must still have a zero product of inertia in *its own*
         // frame if and only if it is symmetric about the corresponding axis; the L-profile is not,
@@ -528,11 +518,7 @@ fn a_feature_thinner_than_the_tolerance_is_never_a_half_built_feature() {
         let s = case.side;
         let plate = box_at(Vec3::ZERO, Vec3::new(s, s, s));
         let tol = plate.tolerance();
-        let at = format!(
-            "solid side {s:e} (diagonal {:e}, tolerance {tol:e}), cut depth {:e}",
-            plate.bounds().diagonal(),
-            case.depth
-        );
+        let at = format!("solid side {s:e} (diagonal {:e}, tolerance {tol:e}), cut depth {:e}", plate.bounds().diagonal(), case.depth);
         assert!(case.depth < tol || case.must_build, "{at}: the case is not in either regime");
         if !case.must_build {
             assert!(case.depth < tol, "{at}: meant to be below the tolerance");
@@ -557,9 +543,11 @@ fn a_feature_thinner_than_the_tolerance_is_never_a_half_built_feature() {
                 if case.must_build {
                     built += 1;
                     assert!(
-                        near(removed, sliver, 1e-9),
-                        "{at}: a cut {case.depth:e} deep is far above the tolerance {tol:e} and must be built exactly: \
-                         removed {removed:e} where the tool covers {sliver:e}"
+                        near_eq(removed, sliver, 1e-9),
+                        "{at}: a cut {:e} deep is far above the tolerance {:e} and must be built exactly: \
+                         removed {removed:e} where the tool covers {sliver:e}",
+                        case.depth,
+                        tol,
                     );
                 } else {
                     resolved += 1;
@@ -572,9 +560,12 @@ fn a_feature_thinner_than_the_tolerance_is_never_a_half_built_feature() {
                     // sliver solid whose volume is neither the body's nor the body's minus the
                     // feature. Both of the honest answers are counted so the report says which one
                     // the kernel gave.
-                    let all = near(removed, sliver, 1e-9);
+                    let all = near_eq(removed, sliver, 1e-9);
                     let none = removed <= sliver * 1e-9;
-                    assert!(all || none, "{at}: a cut below the tolerance removed {removed:e} — part of the {sliver:e} feature. A resolution or a refusal is one answer; half of one is not.");
+                    assert!(
+                        all || none,
+                        "{at}: a cut below the tolerance removed {removed:e} — part of the {sliver:e} feature. A resolution or a refusal is one answer; half of one is not."
+                    );
                     if all {
                         resolved_exactly += 1;
                     } else {
@@ -614,18 +605,7 @@ fn the_relative_tolerance_floor_and_ceiling_hold() {
 
     // The ladder. Each rung is a 1 x 2 x 3 box scaled by `s`, whose exact volume is 6 s³ and whose
     // exact surface area is 2(2s² + 3s² + 6s²) = 22 s².
-    let ladder = [
-        1e6f64,
-        1e0,
-        1e-3,
-        1e-6,
-        1e-9,
-        1e-12,
-        1e-13,
-        1e-14,
-        1e-15,
-        1e-16,
-    ];
+    let ladder = [1e6f64, 1e0, 1e-3, 1e-6, 1e-9, 1e-12, 1e-13, 1e-14, 1e-15, 1e-16];
     let (mut built, mut refused) = (0usize, 0usize);
     let mut smallest_built = 1e6f64;
     let mut first_refusal = String::new();
@@ -646,8 +626,8 @@ fn the_relative_tolerance_floor_and_ceiling_hold() {
                 smallest_built = smallest_built.min(s);
                 let at = format!("scale {s:e} (tolerance {tol:e})");
                 box_solid.validate().unwrap_or_else(|e| panic!("{at}: does not validate: {e}"));
-                assert!(near(box_solid.volume(), want_v, 1e-9), "{at}: volume {:e} against the closed form {want_v:e}", box_solid.volume());
-                assert!(near(box_solid.area(), want_a, 1e-9), "{at}: area {:e} against the closed form {want_a:e}", box_solid.area());
+                assert!(near_eq(box_solid.volume(), want_v, 1e-9), "{at}: volume {:e} against the closed form {want_v:e}", box_solid.volume());
+                assert!(near_eq(box_solid.area(), want_a, 1e-9), "{at}: area {:e} against the closed form {want_a:e}", box_solid.area());
                 assert!(
                     box_solid.tolerance() >= 1e-12 && box_solid.tolerance() <= 1e-3,
                     "{at}: the working tolerance {} is outside the documented clamp",
@@ -668,7 +648,7 @@ fn the_relative_tolerance_floor_and_ceiling_hold() {
     let lo = box_at(Vec3::ZERO, Vec3::new(1.0, 2.0, 3.0) * 1e-6);
     let hi = box_at(Vec3::ZERO, Vec3::new(1.0, 2.0, 3.0) * 1e6);
     assert_eq!(lo.faces.len(), hi.faces.len(), "the face count is a topological fact, not a size");
-    assert!(near(lo.volume() / hi.volume(), (1e-6 / 1e6).powi(3), 1e-9), "volumes scale as the cube");
+    assert!(near_eq(lo.volume() / hi.volume(), (1e-6f64 / 1e6).powi(3), 1e-9), "volumes scale as the cube");
     assert!(lo.tolerance() < hi.tolerance(), "the tolerance still tracks the size across the whole ladder");
 }
 
@@ -701,8 +681,9 @@ fn a_flipped_solid_is_refused_as_pointing_inward() {
         let inside_out = must(s.flipped(), "flipped", &at);
         assert_eq!(inside_out.faces.len(), s.faces.len(), "{at}: the same shell, the same faces");
         assert!(
-            near(inside_out.volume(), -want, 1e-12),
-            "{at}: the same material the other way round should enclose {-want}, got {}",
+            near_eq(inside_out.volume(), -want, 1e-12),
+            "{at}: the same material the other way round should enclose {}, got {}",
+            -want,
             inside_out.volume()
         );
         // The boundary is untouched — flipping is a change of sense, not of geometry.
@@ -716,7 +697,7 @@ fn a_flipped_solid_is_refused_as_pointing_inward() {
         }
         // Flipping it back is exactly the original, to the last bit of every vertex.
         let back = must(inside_out.flipped(), "flipped twice", &at);
-        assert!(near(back.volume(), want, 1e-15), "{at}: flipping twice changed the volume: {} vs {want}", back.volume());
+        assert!(near_eq(back.volume(), want, 1e-15), "{at}: flipping twice changed the volume: {} vs {want}", back.volume());
         back.validate().unwrap_or_else(|e| panic!("{at}: flipped back and it does not validate: {e}"));
     }
 }
@@ -757,7 +738,7 @@ fn orient_faces_recovers_a_solid_whose_faces_were_flipped() {
         let mut flipped = 0usize;
         for i in 0..faces {
             if rng.next() % 4 == 0 {
-                let f = must(broken.faces.get(i).cloned(), "face", &at);
+                let f = broken.faces.get(i).cloned().unwrap_or_else(|| panic!("no face {i} in {at}"));
                 broken.faces[i] = must(f.flipped(), "face.flipped", &at);
                 flipped += 1;
             }
@@ -772,7 +753,7 @@ fn orient_faces_recovers_a_solid_whose_faces_were_flipped() {
                 broken.validate().unwrap_or_else(|e| panic!("{at}: orient_faces left a shell that does not validate: {e}"));
                 broken.validate_vertices().unwrap_or_else(|e| panic!("{at}: orient_faces left a pinched shell: {e}"));
                 assert!(
-                    near(broken.volume(), want, 1e-12),
+                    near_eq(broken.volume(), want, 1e-12),
                     "{at}: orient_faces recovered the right shape ({flipped} faces were flipped) but the volume is {} against {want}",
                     broken.volume()
                 );
@@ -811,7 +792,7 @@ fn reverse_regions_reverses_a_region_without_moving_it() {
         assert_eq!(a.iter().rev().copied().collect::<Vec<Vec2>>(), *b, "the loop reversed");
     }
     // The same area: reversing a loop cannot change what it encloses.
-    assert!(near(region.area(), reversed.area(), 1e-15), "{} vs {}", region.area(), reversed.area());
+    assert!(near_eq(region.area(), reversed.area(), 1e-15), "{} vs {}", region.area(), reversed.area());
     // And reversing twice is the identity.
     assert_eq!(reverse_regions(&reversed), region, "reversing twice is the identity");
 }
@@ -851,18 +832,54 @@ fn boolean_welding_never_moves_geometry_and_is_idempotent() {
     let cases = [
         // A tool that lands on the top face without overlapping it: a boolean here must return
         // the body unchanged, welded or not.
-        Case { name: "tool flush on the top face", a: (Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)), b: (Vec3::new(2.0, 2.0, 10.0), Vec3::new(8.0, 8.0, 20.0)), op: Bool3::Difference, want_volume: 1000.0 },
+        Case {
+            name: "tool flush on the top face",
+            a: (Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)),
+            b: (Vec3::new(2.0, 2.0, 10.0), Vec3::new(8.0, 8.0, 20.0)),
+            op: Bool3::Difference,
+            want_volume: 1000.0,
+        },
         // A tool that cuts a pocket exactly to the top face: removes a 6 x 6 x 5 shaft.
-        Case { name: "pocket to the top face", a: (Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)), b: (Vec3::new(2.0, 2.0, 5.0), Vec3::new(8.0, 8.0, 20.0)), op: Bool3::Difference, want_volume: 1000.0 - 180.0 },
+        Case {
+            name: "pocket to the top face",
+            a: (Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)),
+            b: (Vec3::new(2.0, 2.0, 5.0), Vec3::new(8.0, 8.0, 20.0)),
+            op: Bool3::Difference,
+            want_volume: 1000.0 - 180.0,
+        },
         // A tool that bites a corner: it crosses x = 0 and y = 0 as well as both z faces, so
         // four face planes have to be welded at one corner. The removed wedge is 3 x 3 x 5.
-        Case { name: "tool biting a corner", a: (Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)), b: (Vec3::new(-1.0, -1.0, 5.0), Vec3::new(3.0, 3.0, 20.0)), op: Bool3::Difference, want_volume: 1000.0 - 45.0 },
+        Case {
+            name: "tool biting a corner",
+            a: (Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)),
+            b: (Vec3::new(-1.0, -1.0, 5.0), Vec3::new(3.0, 3.0, 20.0)),
+            op: Bool3::Difference,
+            want_volume: 1000.0 - 45.0,
+        },
         // Corner to corner, sharing one vertex only.
-        Case { name: "touching at a vertex", a: (Vec3::ZERO, Vec3::new(4.0, 4.0, 4.0)), b: (Vec3::new(4.0, 4.0, 4.0), Vec3::new(8.0, 8.0, 8.0)), op: Bool3::Difference, want_volume: 64.0 },
+        Case {
+            name: "touching at a vertex",
+            a: (Vec3::ZERO, Vec3::new(4.0, 4.0, 4.0)),
+            b: (Vec3::new(4.0, 4.0, 4.0), Vec3::new(8.0, 8.0, 8.0)),
+            op: Bool3::Difference,
+            want_volume: 64.0,
+        },
         // Face to face, aligned: the coplanar-merge path.
-        Case { name: "two aligned blocks", a: (Vec3::ZERO, Vec3::new(2.0, 2.0, 1.0)), b: (Vec3::new(0.0, 0.0, 1.0), Vec3::new(2.0, 2.0, 2.0)), op: Bool3::Union, want_volume: 8.0 },
+        Case {
+            name: "two aligned blocks",
+            a: (Vec3::ZERO, Vec3::new(2.0, 2.0, 1.0)),
+            b: (Vec3::new(0.0, 0.0, 1.0), Vec3::new(2.0, 2.0, 2.0)),
+            op: Bool3::Union,
+            want_volume: 8.0,
+        },
         // Disjoint: no welding to do at all, which is the control.
-        Case { name: "disjoint blocks", a: (Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0)), b: (Vec3::new(5.0, 0.0, 0.0), Vec3::new(7.0, 2.0, 2.0)), op: Bool3::Union, want_volume: 16.0 },
+        Case {
+            name: "disjoint blocks",
+            a: (Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0)),
+            b: (Vec3::new(5.0, 0.0, 0.0), Vec3::new(7.0, 2.0, 2.0)),
+            op: Bool3::Union,
+            want_volume: 16.0,
+        },
     ];
 
     let (mut built, mut refused) = (0usize, 0usize);
@@ -886,7 +903,7 @@ fn boolean_welding_never_moves_geometry_and_is_idempotent() {
         first.validate().unwrap_or_else(|e| panic!("{at}: result does not validate: {e}"));
         first.validate_vertices().unwrap_or_else(|e| panic!("{at}: result is pinched: {e}"));
         assert!(
-            near(first.volume(), case.want_volume, 1e-9),
+            near_eq(first.volume(), case.want_volume, 1e-9),
             "{at}: welding moved the volume: {} against the closed form {}",
             first.volume(),
             case.want_volume
@@ -897,8 +914,8 @@ fn boolean_welding_never_moves_geometry_and_is_idempotent() {
         let again = must(boolean(&first, &first, Bool3::Union), "union of a solid with itself", &at);
         again.validate().unwrap_or_else(|e| panic!("{at}: the re-welded result does not validate: {e}"));
         assert_eq!(again.faces.len(), first.faces.len(), "{at}: welding twice changed the face count");
-        assert!(near(again.volume(), first.volume(), 1e-12), "{at}: welding twice changed the volume: {} vs {}", again.volume(), first.volume());
-        assert!(near(again.area(), first.area(), 1e-12), "{at}: welding twice changed the area: {} vs {}", again.area(), first.area());
+        assert!(near_eq(again.volume(), first.volume(), 1e-12), "{at}: welding twice changed the volume: {} vs {}", again.volume(), first.volume());
+        assert!(near_eq(again.area(), first.area(), 1e-12), "{at}: welding twice changed the area: {} vs {}", again.area(), first.area());
         let tol = 1e-12 * first.bounds().diagonal().max(1.0);
         assert!(same_vertex_set(&first, &again, tol), "{at}: welding twice changed the boundary");
     }
@@ -951,7 +968,10 @@ fn an_edge_reference_is_exact_or_refused() {
     // --- just outside the tolerance: nothing there.
     let far = edge_mid + into * 2.0e-6;
     match chamfer(&b, &[EdgeRef::new(far, 1e-6)], 0.75) {
-        Ok(s) => panic!("just outside: a point {far:?} is 2e-6 from the only nearby edge and 1e-6 was the tolerance, so nothing was hit — but a solid of {} faces came back", s.faces.len()),
+        Ok(s) => panic!(
+            "just outside: a point {far:?} is 2e-6 from the only nearby edge and 1e-6 was the tolerance, so nothing was hit — but a solid of {} faces came back",
+            s.faces.len()
+        ),
         Err(e) => assert!(brief(&e).contains("no edge passes through"), "just outside: the error has to say what is missing: {e}"),
     }
     // And the same point with a tolerance that reaches it resolves — the tolerance is the rule,
@@ -966,18 +986,23 @@ fn an_edge_reference_is_exact_or_refused() {
     must(chamfer(&b, &[EdgeRef::new(just_under_solid_tol, 0.0)], 0.75), "chamfer with tolerance 0", "solid tolerance floor");
     let just_over_solid_tol = edge_mid + into * (tol * 4.0);
     match chamfer(&b, &[EdgeRef::new(just_over_solid_tol, 0.0)], 0.75) {
-        Ok(s) => panic!("solid tolerance floor: {just_over_solid_tol:?} is four tolerances from the nearest edge and the reference tolerance is 0, but a solid of {} faces came back", s.faces.len()),
+        Ok(s) => panic!(
+            "solid tolerance floor: {just_over_solid_tol:?} is four tolerances from the nearest edge and the reference tolerance is 0, but a solid of {} faces came back",
+            s.faces.len()
+        ),
         Err(e) => assert!(brief(&e).contains("no edge passes through"), "solid tolerance floor: {e}"),
     }
 
     // --- ambiguous: a corner of the box, where three edges meet.
     for corner in [Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0), Vec3::new(0.0, 10.0, 10.0), Vec3::new(10.0, 10.0, 0.0)] {
-        for (name, got) in [
-            ("chamfer", chamfer(&b, &[EdgeRef::new(corner, 1e-6)], 0.75)),
-            ("fillet", fillet(&b, &[EdgeRef::new(corner, 1e-6)], 0.75, 8)),
-        ] {
+        for (name, got) in
+            [("chamfer", chamfer(&b, &[EdgeRef::new(corner, 1e-6)], 0.75)), ("fillet", fillet(&b, &[EdgeRef::new(corner, 1e-6)], 0.75, 8))]
+        {
             match got {
-                Ok(s) => panic!("ambiguous {name} at {corner:?}: a corner is on three edges and must not silently pick one, but a solid of {} faces came back", s.faces.len()),
+                Ok(s) => panic!(
+                    "ambiguous {name} at {corner:?}: a corner is on three edges and must not silently pick one, but a solid of {} faces came back",
+                    s.faces.len()
+                ),
                 Err(e) => assert!(brief(&e).contains("ambiguous"), "ambiguous {name} at {corner:?}: {e}"),
             }
         }
@@ -992,7 +1017,10 @@ fn an_edge_reference_is_exact_or_refused() {
     let touching = edges.iter().filter(|e| e.a.near(top_vertex, 1e-9) || e.b.near(top_vertex, 1e-9)).count();
     assert!(touching >= 2, "a prism's top rim vertex has at least two edges on it, found {touching}");
     match chamfer(&prism, &[EdgeRef::new(top_vertex, 1e-9)], 0.25) {
-        Ok(s) => panic!("shared vertex {top_vertex:?}: {touching} edges pass through it and the reference must be refused, but a solid of {} faces came back", s.faces.len()),
+        Ok(s) => panic!(
+            "shared vertex {top_vertex:?}: {touching} edges pass through it and the reference must be refused, but a solid of {} faces came back",
+            s.faces.len()
+        ),
         Err(e) => assert!(brief(&e).contains("ambiguous"), "shared vertex {top_vertex:?}: {e}"),
     }
 
@@ -1032,9 +1060,10 @@ fn an_edge_reference_is_exact_or_refused() {
     }
 
     // --- the control: no references at all is a no-op that returns the body it was given.
+    let body_volume = b.volume();
     let same = must(chamfer(&b, &[], 0.75), "chamfer with no references", "no references");
     assert_eq!(same.faces, b.faces, "no edges to blend is the body unchanged");
-    assert!(near(same.volume(), b.volume(), 1e-15), "and the same volume");
+    assert!(near_eq(same.volume(), body_volume, 1e-15), "and the same volume");
 }
 
 /// A reference is matched against the *edge*, not against a face, and not against the body.
@@ -1089,7 +1118,7 @@ fn the_section_step_of_a_boolean_is_exact_or_named() {
         Ok(s) => {
             built += 1;
             s.validate().unwrap_or_else(|e| panic!("through cut: {e}"));
-            assert!(near(s.volume(), 1000.0 - 4.0 * 4.0 * 10.0, 1e-9), "through cut: {} against 840", s.volume());
+            assert!(near_eq(s.volume(), 1000.0 - 4.0 * 4.0 * 10.0, 1e-9), "through cut: {} against 840", s.volume());
         }
         Err(e) => {
             other_errors += 1;
@@ -1106,7 +1135,7 @@ fn the_section_step_of_a_boolean_is_exact_or_named() {
         Ok(s) => {
             built += 1;
             s.validate().unwrap_or_else(|e| panic!("flush tool: {e}"));
-            assert!(near(s.volume(), 1000.0, 1e-9), "a tool flush with the top face removes nothing, got {}", s.volume());
+            assert!(near_eq(s.volume(), 1000.0, 1e-9), "a tool flush with the top face removes nothing, got {}", s.volume());
         }
         Err(e) => {
             other_errors += 1;
@@ -1125,7 +1154,7 @@ fn the_section_step_of_a_boolean_is_exact_or_named() {
             // The only acceptable outcome: a shell the kernel is willing to stand behind. A solid
             // that fails `validate` is the bug this case exists to catch.
             s.validate().unwrap_or_else(|e| panic!("coplanar cover: returned a shell that does not validate: {e}"));
-            assert!(near(s.volume(), 1000.0, 1e-9), "coplanar cover: the plate lost material it should not have: {}", s.volume());
+            assert!(near_eq(s.volume(), 1000.0, 1e-9), "coplanar cover: the plate lost material it should not have: {}", s.volume());
         }
         Err(e) => {
             other_errors += 1;
@@ -1309,8 +1338,8 @@ fn a_face_is_a_value_and_its_constructor_is_the_gate() {
     assert!(f.area() == area && f.vertices() == verts && f.edges() == edges, "deriving from a face mutated it");
 
     // Each derived face is the same boundary in a different frame: same area, same world vertices.
-    assert!(near(f.area(), flipped.area(), 1e-12), "flipping changed the area: {} vs {}", flipped.area(), f.area());
-    assert!(near(f.area(), mirrored.area(), 1e-12), "retargeting changed the area: {} vs {}", mirrored.area(), f.area());
+    assert!(near_eq(f.area(), flipped.area(), 1e-12), "flipping changed the area: {} vs {}", flipped.area(), f.area());
+    assert!(near_eq(f.area(), mirrored.area(), 1e-12), "retargeting changed the area: {} vs {}", mirrored.area(), f.area());
     for other in [&flipped, &mirrored] {
         let mut a: Vec<Vec3> = f.vertices();
         let mut b: Vec<Vec3> = other.vertices();
@@ -1362,7 +1391,7 @@ fn a_triangle_reports_its_own_normal_area_and_centre() {
         let n = (b - a).cross(c - a);
         let area = n.len() * 0.5;
         assert!(t.normal().near(n.normalized(), 1e-12), "{at}: normal {:?}", t.normal());
-        assert!(near(t.area(), area, 1e-12), "{at}: area {} against {area}", t.area());
+        assert!(near_eq(t.area(), area, 1e-12), "{at}: area {} against {area}", t.area());
         assert!(t.center().near((a + b + c) / 3.0, 1e-12), "{at}: centre {:?}", t.center());
         // The normal is perpendicular to both edges, or the triangle is degenerate.
         if area > 1e-9 {
@@ -1371,5 +1400,5 @@ fn a_triangle_reports_its_own_normal_area_and_centre() {
     }
     // A degenerate triangle: zero area and a zero normal, not a NaN and not a panic.
     let degenerate = Triangle { a: Vec3::ZERO, b: Vec3::X, c: Vec3::new(2.0, 0.0, 0.0) };
-    assert!(near(degenerate.area(), 0.0, 1e-15) && degenerate.normal().len() < 1e-12, "collinear points make no triangle");
+    assert!(near_eq(degenerate.area(), 0.0, 1e-15) && degenerate.normal().len() < 1e-12, "collinear points make no triangle");
 }
