@@ -300,7 +300,7 @@ fn integrate(mesh: &Mesh, origin: Vec3) -> (f64, Vec3, Tensor) {
         first = first + ((p[0] + p[1] + p[2] + p[3]) / 4.0) * v;
         let moment = |i: usize, j: usize| -> f64 {
             let mut pair = 0.0;
-            let mut (si, sj) = (0.0, 0.0);
+            let (mut si, mut sj) = (0.0, 0.0);
             for k in 0..4 {
                 pair += p[k].get(i) * p[k].get(j);
                 si += p[k].get(i);

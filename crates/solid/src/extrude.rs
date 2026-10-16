@@ -130,6 +130,11 @@ pub fn revolve(profile: &Regions, plane: &Plane, axis: Vec3, angle: f64, segment
     // Only a segment with *both* ends on the axis is dropped. A segment with one end there is a cone
     // apex, which is real geometry: one of its two patches is degenerate and `triangle_face` drops
     // that, and the other is the cone.
+    // A point is on the axis when its `u` component is zero: the axis is the plane's `v` direction
+    // through the origin, so every point of it has no `u`. Requiring the `v` component to vanish
+    // too looks equivalent and is not — it also matches every profile edge that happens to sit at
+    // `v = 0`, i.e. at the height of the axis but nowhere near it, and drops those edges from the
+    // sweep. The property suite caught that as two extra failures (`weld`-style, not weld).
     let on_axis = |w: Vec3| -> bool { (w - origin).dot(plane.u).abs() <= 1e-12 };
     for lp in profile.loops() {
         let n = lp.len();
