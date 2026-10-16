@@ -704,6 +704,7 @@ dependencies = [
 name = "cadcraft-model"
 version = "0.7.0"
 dependencies = [
+ "cadcraft-constraints",
  "cadcraft-geom",
  "cadcraft-solid",
  "serde",
