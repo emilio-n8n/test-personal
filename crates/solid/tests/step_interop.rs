@@ -451,7 +451,7 @@ const SCHEMA: &[(&str, &[Want])] = &[
     ("SHAPE_DEFINITION_REPRESENTATION", &[Want::Ref, Want::Ref]),
 ];
 
-/// What each *referenced* attribute of an entity must name, for the keywords that hold references.
+/// What each attribute of an entity must be, for the keywords whose attributes include a reference.
 ///
 /// [`SCHEMA`] establishes that an attribute is a reference. This table says to which entity, which
 /// is the half of the check a graph-walking reader cannot do: `#17=AXIS2_PLACEMENT_3D('',#12,#13,
@@ -460,37 +460,56 @@ const SCHEMA: &[(&str, &[Want])] = &[
 /// vertex rather than a point in space. That is exactly the defect this writer had, and neither
 /// parser here noticed it until this table existed.
 ///
+/// **The table is positional: entry `i` describes attribute `i`**, exactly as [`SCHEMA`] lists the
+/// attributes, so a row has one entry per attribute. It was not written that way at first. Most
+/// rows began at the first *reference*, leaving the `name` — or `id` — the entity carries in front
+/// of it implicit, and [`check_typed`] indexes the argument list from zero; a row of that shape
+/// compares the name against a reference type and fails on `VERTEX_POINT` before it ever reaches
+/// the one reference the table exists to check. Those implicit leading attributes are written out
+/// as `any` here. Removing an `any` is not harmless either: it slides every entry after it one
+/// attribute to the left, and the check then compares a reference against its neighbour. One row
+/// was wrong in that second direction and is corrected: `PRODUCT_DEFINITION_FORMATION` (`id`,
+/// `description`, `of_product`) named its one reference without the two identifiers in front of it.
+///
+/// `any` is an attribute this table has no opinion about — a name, an identifier, a description, a
+/// magnitude, a flag. `enum` is an enumeration. Neither is a reference and neither is checked
+/// against a keyword. `list:X|Y` is a list whose every item must be a reference to `X` or `Y`, and
+/// a bare `X|Y` a single reference. `A|B` accepts either, and a complex instance matches if any of
+/// its parts does, which is how every unit in the file is written.
+///
 /// A keyword absent from this table is one that carries no references — `CARTESIAN_POINT`,
 /// `DIRECTION`, the three unit keywords, `SI_UNIT` — or one this reader has not been given an
-/// opinion about, and those are not checked. Unlike [`SCHEMA`] this table is deliberately partial:
-/// it is a list of what must be true, not a claim to be complete. `A|B` accepts either, and a
-/// complex instance matches if any of its parts does, which is how every unit in the file is
-/// written.
+/// opinion about, and those are not checked. Unlike [`SCHEMA`] this table is deliberately partial
+/// in which keywords it covers: it is a list of what must be true, not a claim to be complete.
 const REFERENCED: &[(&str, &[&str])] = &[
-    ("VERTEX_POINT", &["CARTESIAN_POINT"]),
-    ("VECTOR", &["DIRECTION"]),
-    ("LINE", &["CARTESIAN_POINT", "VECTOR"]),
-    ("EDGE_CURVE", &["VERTEX_POINT", "VERTEX_POINT", "LINE", "enum"]),
-    ("POLY_LOOP", &["list:VERTEX_POINT"]),
-    ("FACE_OUTER_BOUND", &["POLY_LOOP", "enum"]),
-    ("FACE_BOUND", &["POLY_LOOP", "enum"]),
-    ("ADVANCED_FACE", &["list:FACE_OUTER_BOUND|FACE_BOUND", "PLANE", "enum"]),
-    ("FACE_SURFACE", &["list:FACE_OUTER_BOUND|FACE_BOUND", "PLANE", "enum"]),
+    ("VERTEX_POINT", &["any", "CARTESIAN_POINT"]),
+    ("VECTOR", &["any", "DIRECTION", "any"]),
+    ("LINE", &["any", "CARTESIAN_POINT", "VECTOR"]),
+    ("EDGE_CURVE", &["any", "VERTEX_POINT", "VERTEX_POINT", "LINE", "enum"]),
+    ("POLY_LOOP", &["any", "list:VERTEX_POINT"]),
+    ("FACE_OUTER_BOUND", &["any", "POLY_LOOP", "enum"]),
+    ("FACE_BOUND", &["any", "POLY_LOOP", "enum"]),
+    ("ADVANCED_FACE", &["any", "list:FACE_OUTER_BOUND|FACE_BOUND", "PLANE", "enum"]),
+    ("FACE_SURFACE", &["any", "list:FACE_OUTER_BOUND|FACE_BOUND", "PLANE", "enum"]),
     // The one this table exists for.
-    ("AXIS2_PLACEMENT_3D", &["CARTESIAN_POINT", "DIRECTION", "DIRECTION"]),
-    ("PLANE", &["AXIS2_PLACEMENT_3D"]),
-    ("CLOSED_SHELL", &["list:ADVANCED_FACE|FACE_SURFACE"]),
-    ("FACETED_BREP", &["CLOSED_SHELL"]),
+    ("AXIS2_PLACEMENT_3D", &["any", "CARTESIAN_POINT", "DIRECTION", "DIRECTION"]),
+    ("PLANE", &["any", "AXIS2_PLACEMENT_3D"]),
+    ("CLOSED_SHELL", &["any", "list:ADVANCED_FACE|FACE_SURFACE"]),
+    ("FACETED_BREP", &["any", "CLOSED_SHELL"]),
     ("COMPOSITE_CURVE_SEGMENT", &["enum", "enum", "EDGE_CURVE|LINE"]),
-    ("COMPOSITE_CURVE", &["list:COMPOSITE_CURVE|COMPOSITE_CURVE_SEGMENT", "enum"]),
-    ("GEOMETRIC_CURVE_SET", &["list:COMPOSITE_CURVE|EDGE_CURVE|LINE"]),
+    ("COMPOSITE_CURVE", &["any", "list:COMPOSITE_CURVE|COMPOSITE_CURVE_SEGMENT", "enum"]),
+    ("GEOMETRIC_CURVE_SET", &["any", "list:COMPOSITE_CURVE|EDGE_CURVE|LINE"]),
+    // The two entry points. Nothing in the file names them, so they are the only entities a
+    // reference check cannot reach from elsewhere — which is exactly why they get a row here.
+    ("GEOMETRICALLY_BOUNDED_WIREFRAME_SHAPE_REPRESENTATION", &["any", "list:GEOMETRIC_CURVE_SET", "GEOMETRIC_REPRESENTATION_CONTEXT"]),
+    ("ADVANCED_BREP_SHAPE_REPRESENTATION", &["any", "list:AXIS2_PLACEMENT_3D|FACETED_BREP", "GEOMETRIC_REPRESENTATION_CONTEXT"]),
     ("UNCERTAINTY_MEASURE_WITH_UNIT", &["any", "LENGTH_UNIT|PLANE_ANGLE_UNIT|SOLID_ANGLE_UNIT", "any", "any"]),
     ("GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT", &["list:UNCERTAINTY_MEASURE_WITH_UNIT"]),
     ("GLOBAL_UNIT_ASSIGNED_CONTEXT", &["list:LENGTH_UNIT|PLANE_ANGLE_UNIT|SOLID_ANGLE_UNIT"]),
-    ("PRODUCT_CONTEXT", &["APPLICATION_CONTEXT", "any"]),
+    ("PRODUCT_CONTEXT", &["any", "APPLICATION_CONTEXT", "any"]),
     ("PRODUCT", &["any", "any", "any", "list:PRODUCT_CONTEXT"]),
-    ("PRODUCT_DEFINITION_FORMATION", &["PRODUCT"]),
-    ("PRODUCT_DEFINITION_CONTEXT", &["APPLICATION_CONTEXT", "any"]),
+    ("PRODUCT_DEFINITION_FORMATION", &["any", "any", "PRODUCT"]),
+    ("PRODUCT_DEFINITION_CONTEXT", &["any", "APPLICATION_CONTEXT", "any"]),
     ("PRODUCT_DEFINITION", &["any", "any", "PRODUCT_DEFINITION_FORMATION", "PRODUCT_DEFINITION_CONTEXT"]),
     ("PRODUCT_DEFINITION_SHAPE", &["any", "any", "PRODUCT_DEFINITION"]),
     (
@@ -580,6 +599,25 @@ fn check_one(keyword: &str, args: &[Arg], id: usize) {
     assert_eq!(args.len(), wants.len(), "#{id} = {keyword} has {} attributes, its schema gives {}", args.len(), wants.len());
     for (i, (want, arg)) in wants.iter().zip(args.iter()).enumerate() {
         assert!(want_matches(*want, arg), "#{id} = {keyword}, attribute {i} is {arg:?}, its schema wants {want:?}");
+    }
+}
+
+/// Every instance in the file against [`SCHEMA`], each part of a complex instance on its own.
+///
+/// A complex instance is not one entity with one attribute list: part 21 writes it as several
+/// simple instances glued together, so each part has to answer for its own attributes. This is the
+/// check a keyword the writer invented, or an argument dropped from or added to one it knows, fails
+/// on: [`SCHEMA`] gives the exact count and kind of every attribute of every keyword this file can
+/// emit.
+fn check_schema(entities: &[Entity]) {
+    for e in entities {
+        if e.parts.is_empty() {
+            check_one(&e.keyword, &e.args, e.id);
+        } else {
+            for (name, args) in &e.parts {
+                check_one(name, args, e.id);
+            }
+        }
     }
 }
 
