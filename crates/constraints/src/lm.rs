@@ -5,6 +5,10 @@
 //! `Δx = −W⁻¹ Jᵀ (J W⁻¹ Jᵀ + μ I)⁻¹ r`. Under-constrained systems therefore move as little as
 //! possible, and heavily weighted parameters (geometry the user just edited, or the first object
 //! picked) move least.
+//!
+//! [`solve_least_squares`] is the public entry point: it solves any system of residual equations
+//! `f(x) = 0` from an initial guess, with [`Options`] for the tolerance, iteration cap, moving
+//! parameters and weights, and reports back through [`Report`].
 
 /// Most residual rows one solve may have (the normal matrix is rows × rows).
 pub const MAX_ROWS: usize = 800;
@@ -12,6 +16,8 @@ pub const MAX_ROWS: usize = 800;
 pub(crate) struct Outcome {
     pub x: Vec<f64>,
     pub converged: bool,
+    pub iterations: usize,
+    pub residual: f64,
 }
 
 pub(crate) fn max_abs(v: &[f64]) -> f64 {
@@ -229,10 +235,10 @@ pub(crate) fn solve(f: &dyn Fn(&[f64], &mut Vec<f64>), x0: &[f64], free: &[usize
     f(&x, &mut r);
     let rows = r.len();
     if rows == 0 || max_abs(&r) <= tol {
-        return Outcome { x, converged: true };
+        return Outcome { x, converged: true, iterations: 0, residual: max_abs(&r) };
     }
     if free.is_empty() || rows > MAX_ROWS {
-        return Outcome { x, converged: false };
+        return Outcome { x, converged: false, iterations: 0, residual: max_abs(&r) };
     }
     let nf = free.len();
     let winv: Vec<f64> = free.iter().map(|&j| 1.0 / weights.get(j).copied().unwrap_or(1.0).max(1e-12)).collect();
@@ -296,14 +302,86 @@ pub(crate) fn solve(f: &dyn Fn(&[f64], &mut Vec<f64>), x0: &[f64], free: &[usize
             mu *= 10.0;
         }
         if max_abs(&r) <= tol {
-            return Outcome { x, converged: true };
+            return Outcome { x, converged: true, iterations: iter, residual: max_abs(&r) };
         }
         if !improved {
             break;
         }
     }
     let converged = max_abs(&r) <= tol;
-    Outcome { x, converged }
+    Outcome { x, converged, iterations: iter, residual: max_abs(&r) }
+}
+
+/// Options for a least-squares solve ([`solve_least_squares`]).
+#[derive(Clone, Debug)]
+pub struct Options {
+    /// Convergence tolerance on the largest absolute residual: the solve stops when every
+    /// residual is within `tol` of zero. Default: `1e-12`.
+    pub tol: f64,
+    /// Maximum number of damped Gauss–Newton iterations. Default: 200.
+    pub max_iter: usize,
+    /// Indices of the parameters that may move; every other parameter keeps its initial value.
+    /// Empty means all parameters may move. Indices past the end of the parameter vector are
+    /// ignored. Default: all.
+    pub free: Vec<usize>,
+    /// Per-parameter weights, indexed like the parameter vector: a parameter with weight `w`
+    /// moves `1/w` times as far as one with weight `1`. Entries at parameters not in `free` are
+    /// ignored, and missing entries count as `1.0`. Default: all `1.0`.
+    pub weights: Vec<f64>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options { tol: 1e-12, max_iter: crate::MAX_ITER, free: Vec::new(), weights: Vec::new() }
+    }
+}
+
+/// The outcome of a least-squares solve ([`solve_least_squares`]).
+///
+/// `converged` is `false` when the system could not be solved: its residuals are inconsistent
+/// (no exact solution exists) or its Jacobian is singular or too ill-conditioned along the
+/// path. That is a report, not a solver failure: a singular Jacobian is surfaced here as
+/// `converged: false`, never panicked on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Report {
+    /// The parameters at the best point reached; finite whenever `x0` is, even when
+    /// `converged` is `false`.
+    pub x: Vec<f64>,
+    /// Whether every residual ended within [`Options::tol`].
+    pub converged: bool,
+    /// Iterations actually run (`0` when the initial guess already satisfied the tolerance).
+    pub iterations: usize,
+    /// The largest absolute residual at the returned point (`f64::INFINITY` when a residual
+    /// was not finite).
+    pub residual: f64,
+}
+
+/// Solve `f(x) = 0` from the initial guess `x0` by minimising the sum of squared residuals with
+/// a damped, weighted minimum-norm Gauss–Newton (Levenberg–Marquardt) method and a numerical
+/// Jacobian.
+///
+/// Each step takes the cheapest weighted step that satisfies the local linearisation, so
+/// under-constrained systems move as little as possible and heavily weighted parameters move
+/// least. Only the parameters listed in [`Options::free`] move.
+///
+/// # Guarantees
+///
+/// - Never panics, on any input: a singular Jacobian is reported as `converged: false`, never
+///   unwound on.
+/// - `report.x` holds the best point reached (finite whenever `x0` is), and a system whose
+///   residuals already are within `tol` converges immediately.
+///
+/// # Not guaranteed
+///
+/// - Convergence. A system with no exact solution, or one whose Jacobian is singular along the
+///   path, ends non-converged after [`Options::max_iter`] iterations or when no damped step
+///   improves the cost; `report.iterations` and `report.residual` say how it ended.
+/// - Systems with more than [`MAX_ROWS`] residual rows are reported non-converged.
+pub fn solve_least_squares<F: Fn(&[f64], &mut Vec<f64>)>(f: F, x0: &[f64], opts: &Options) -> Report {
+    let free: Vec<usize> = if opts.free.is_empty() { (0..x0.len()).collect() } else { opts.free.clone() };
+    let weights: Vec<f64> = if opts.weights.is_empty() { vec![1.0; x0.len()] } else { opts.weights.clone() };
+    let o = solve(&f, x0, &free, &weights, opts.tol, opts.max_iter);
+    Report { x: o.x, converged: o.converged, iterations: o.iterations, residual: o.residual }
 }
 
 #[cfg(test)]
@@ -356,5 +434,69 @@ mod tests {
         let o = solve(&f, &[0.0], &[0], &[1.0], 1e-10, 100);
         assert!(!o.converged);
         assert!(o.x[0].is_finite());
+    }
+
+    #[test]
+    fn public_api_linear_system_solves_exactly() {
+        // x + y = 2 and x − y = 4 → (3, −1): linear, so the damped step lands on it exactly.
+        let f = |x: &[f64], out: &mut Vec<f64>| {
+            out.push(x[0] + x[1] - 2.0);
+            out.push(x[0] - x[1] - 4.0);
+        };
+        let report = solve_least_squares(&f, &[0.0, 0.0], &Options::default());
+        assert!(report.converged, "linear system must converge, residual {}", report.residual);
+        assert!((report.x[0] - 3.0).abs() < 1e-9, "x = {:?}", report.x);
+        assert!((report.x[1] + 1.0).abs() < 1e-9, "x = {:?}", report.x);
+        assert!(report.residual < 1e-12);
+        assert!(report.iterations >= 1);
+    }
+
+    #[test]
+    fn public_api_nonlinear_system_converges() {
+        // x² = 4 and y = 3 from (1, 1) → (2, 3).
+        let f = |x: &[f64], out: &mut Vec<f64>| {
+            out.push(x[0] * x[0] - 4.0);
+            out.push(x[1] - 3.0);
+        };
+        let report = solve_least_squares(&f, &[1.0, 1.0], &Options::default());
+        assert!(report.converged, "nonlinear system must converge, residual {}", report.residual);
+        assert!((report.x[0] - 2.0).abs() < 1e-9, "x = {:?}", report.x);
+        assert!((report.x[1] - 3.0).abs() < 1e-9, "x = {:?}", report.x);
+    }
+
+    #[test]
+    fn public_api_singular_system_is_reported_not_panicked() {
+        // Dependent rows (rank-deficient Jacobian) with inconsistent targets: x − y cannot be
+        // both 1 and 1.5, so no exact solution exists. The solver must report non-convergence
+        // with a finite best point, never panic.
+        let f = |x: &[f64], out: &mut Vec<f64>| {
+            out.push(x[0] - x[1] - 1.0);
+            out.push(2.0 * x[0] - 2.0 * x[1] - 3.0);
+        };
+        let report = solve_least_squares(&f, &[0.0, 0.0], &Options::default());
+        assert!(!report.converged, "a singular inconsistent system must not converge");
+        assert!(report.x.iter().all(|v| v.is_finite()), "x must stay finite: {:?}", report.x);
+        assert!(report.residual > 1e-6, "the residual must be reported, got {}", report.residual);
+    }
+
+    #[test]
+    fn public_api_options_free() {
+        // Only parameter 1 may move: x0 + x1 = 2 with x0 locked at 0 solves to x1 = 2.
+        let f = |x: &[f64], out: &mut Vec<f64>| out.push(x[0] + x[1] - 2.0);
+        let opts = Options { free: vec![1], ..Default::default() };
+        let report = solve_least_squares(&f, &[0.0, 0.0], &opts);
+        assert!(report.converged, "locked-parameter system must converge, residual {}", report.residual);
+        assert!(report.x[0].abs() < 1e-15, "a parameter outside `free` must not move, x = {:?}", report.x);
+        assert!((report.x[1] - 2.0).abs() < 1e-12, "x = {:?}", report.x);
+    }
+
+    #[test]
+    fn public_api_empty_system_converges_immediately() {
+        let f = |_: &[f64], _: &mut Vec<f64>| {};
+        let report = solve_least_squares(&f, &[1.0, 2.0], &Options::default());
+        assert!(report.converged);
+        assert_eq!(report.x, vec![1.0, 2.0]);
+        assert_eq!(report.iterations, 0);
+        assert!(report.residual < 1e-12);
     }
 }

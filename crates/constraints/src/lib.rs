@@ -6,6 +6,8 @@
 //! residuals to zero with a weighted minimum-norm damped Gauss–Newton solver ([`lm`]), so
 //! geometry moves as little as possible and geometry the caller wants kept (just edited, or picked
 //! first) moves least. Fix locks parameters. Constraints are solved per connected component.
+//! The solver itself is public ([`lm::solve_least_squares`]): any caller with residual equations
+//! and an initial guess can solve them with the same damped, weighted minimum-norm steps.
 //!
 //! Inconsistent systems are not "solved" by moving things wildly: the solve fails, nothing is
 //! written back, and the error names the conflicting constraints (each one whose removal makes
@@ -26,7 +28,7 @@ pub mod auto;
 mod curves;
 mod dof;
 pub mod expr;
-mod lm;
+pub mod lm;
 mod model;
 mod residual;
 
