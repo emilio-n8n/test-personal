@@ -281,7 +281,14 @@ pub fn step_faceted_brep(solid: &Solid, name: &str) -> Result<String, SolidError
     //    vector points from the start vertex to the end one.
     let mut edge = Vec::with_capacity(topo.edges.len());
     for (a, b) in &topo.edges {
-        let (Some(&start), Some(&end), Some(p), Some(q)) = (vertex.get(*a), vertex.get(*b), topo.points.get(*a), topo.points.get(*b)) else {
+        // `start`/`end` are the topological `VERTEX_POINT`s that `EDGE_CURVE` names, and
+        // `line_start`/`line_end` are the geometric `CARTESIAN_POINT`s that the `LINE` passing
+        // through that edge actually sits on. `LINE`'s point attribute is a geometric point, not a
+        // topological vertex — writing a `VERTEX_POINT` there is a type error of exactly the kind the
+        // second interop parser's reference-typing table rejects.
+        let (Some(&start), Some(&end), Some(&line_start), Some(p), Some(q)) =
+            (vertex.get(*a), vertex.get(*b), point_id.get(*a), topo.points.get(*a), topo.points.get(*b))
+        else {
             continue;
         };
         let delta = *q - *p;
@@ -293,7 +300,7 @@ pub fn step_faceted_brep(solid: &Solid, name: &str) -> Result<String, SolidError
         }
         let dir = dirs.id(&mut w, delta / len)?;
         let vector = w.entity(&format!("VECTOR('',#{dir},{})", real(len)))?;
-        let line = w.entity(&format!("LINE('',#{start},#{vector})"))?;
+        let line = w.entity(&format!("LINE('',#{line_start},#{vector})"))?;
         edge.push(w.entity(&format!("EDGE_CURVE('',#{start},#{end},#{line},.T.)"))?);
     }
 
