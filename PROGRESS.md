@@ -357,3 +357,34 @@ chamfer's feature size at that point.
 
 The same defect family is already visible in `KER-BOOL-002` (union across a shared plane) — both are
 cases where two faces must agree along a seam and the welding does not make them.
+
+### Blend scale defect — root cause identified by sweep
+
+Swept `side` × `d` on a box chamfer at its vertical edge. Results:
+
+```
+side      4:  ok  ok   -   -
+side     10:  ok  ok  ok  ok
+side     25:  ok  ok  ok  ok
+side     50: ERR ok  ok  ok
+side    100: ERR ok  ok  ok        (d = 0.25)
+side    200:  ok ERR ok  ok        (d = 1)
+side    400:  ok ERR ERR ERR      (d = 1, 2, 3)
+ratio 1/400 swept over scale: ERR at every scale from 100 to 1600
+side 100, d swept: 0.005..0.2 ok, 0.25 ERR, 0.3 ok, 0.5 ERR, 1.0 ok
+```
+
+**It is not a ratio threshold.** At side 100, d=0.2 passes, d=0.25 fails, d=0.3 *passes again*,
+d=0.5 fails, d=1.0 passes. A monotone tolerance explanation is already excluded.
+
+What separates the failures is that **d is exactly representable in binary**: 0.25 = 2^-2 and
+0.5 = 2^-1 fail; 0.2, 0.3, 0.05, 1.0 (which is exact too, but large relative to the box) do not.
+When d is a power of two every coordinate in the boolean is exact, and `weld_edges`'s snapping
+grid — `((v - origin) * (1/tol)).round()` with `tol = diagonal * 1e-9` — lands points exactly on a
+cell boundary, so a vertex is rounded into a different cell in one face than in its neighbour and
+the two faces never share the welded edge.
+
+That is the cell-straddle weakness `KER-BOOL-004` names, and this sweep is its minimal
+reproducer: `side = 100, d = 0.25` (and `side = 50, d = 0.25`, `side = 200, d = 1`). The fix belongs
+in the weld: snap to a coarser lattice and de-duplicate by proximity, or search neighbouring cells,
+rather than trusting one rounded cell index.
