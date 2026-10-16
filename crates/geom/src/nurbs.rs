@@ -770,3 +770,527 @@ mod tests {
         assert!(e.param_at_length(f64::NAN, 1.0).is_none());
     }
 }
+
+// ---------------------------------------------------------------------------
+// 3D non-rational NURBS curve (KER-SRF-001).
+//
+// Distinct from the 2D `Spline` above: this type carries `Vec3` control points
+// and no weights. Weights are deliberately deferred to a later task; see
+// `NurbsCurve::is_rational`.
+// ---------------------------------------------------------------------------
+
+/// A (so far non-rational) B-spline curve in three dimensions.
+///
+/// The struct fields are public for construction by the kernel, but callers are
+/// expected to go through [`NurbsCurve::new`] so the invariants hold. A
+/// literal with broken invariants makes the evaluation routines return zeroes
+/// rather than panicking.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NurbsCurve {
+    pub degree: usize,
+    pub knots: Vec<f64>,
+    pub control: Vec<crate::Vec3>,
+}
+
+/// Why a [`NurbsCurve`] could not be built or evaluated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NurbsError {
+    /// `degree < 1`, or too few control points for the requested degree.
+    BadDegree,
+    /// `knots.len() != control.len() + degree + 1`.
+    KnotCountMismatch,
+    /// A knot is greater than one that follows it.
+    NonMonotoneKnots,
+    /// The domain `[knots[degree], knots[len-degree-1]]` is empty.
+    EmptyDomain,
+    /// A knot or control coordinate is not finite.
+    NonFiniteInput,
+    /// A parameter was requested outside the curve's domain.
+    OutOfDomain,
+}
+
+impl std::fmt::Display for NurbsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let msg = match self {
+            NurbsError::BadDegree => "bad NURBS degree or control-point count",
+            NurbsError::KnotCountMismatch => "NURBS knot count does not match the control points",
+            NurbsError::NonMonotoneKnots => "NURBS knots are not non-decreasing",
+            NurbsError::EmptyDomain => "NURBS domain is empty",
+            NurbsError::NonFiniteInput => "NURBS input is not finite",
+            NurbsError::OutOfDomain => "NURBS parameter is outside the domain",
+        };
+        f.write_str(msg)
+    }
+}
+
+impl std::error::Error for NurbsError {}
+
+impl NurbsCurve {
+    /// Build a curve, validating all invariants.
+    pub fn new(
+        degree: usize,
+        knots: Vec<f64>,
+        control: Vec<crate::Vec3>,
+    ) -> Result<Self, NurbsError> {
+        if degree < 1 {
+            return Err(NurbsError::BadDegree);
+        }
+        if !knots.iter().all(|x| x.is_finite())
+            || !control.iter().all(|c| c.is_finite())
+        {
+            return Err(NurbsError::NonFiniteInput);
+        }
+        let n = control.len();
+        if n <= degree {
+            return Err(NurbsError::BadDegree);
+        }
+        if knots.len() != n + degree + 1 {
+            return Err(NurbsError::KnotCountMismatch);
+        }
+        if knots.windows(2).any(|w| w[0] > w[1]) {
+            return Err(NurbsError::NonMonotoneKnots);
+        }
+        let lo = knots.get(degree).copied().unwrap_or(f64::NAN);
+        let hi = knots.get(n).copied().unwrap_or(f64::NAN);
+        if !(hi > lo) {
+            return Err(NurbsError::EmptyDomain);
+        }
+        Ok(Self { degree, knots, control })
+    }
+
+    fn is_valid(&self) -> bool {
+        if self.degree < 1 {
+            return false;
+        }
+        let n = self.control.len();
+        if n <= self.degree {
+            return false;
+        }
+        if self.knots.len() != n + self.degree + 1 {
+            return false;
+        }
+        if !self.knots.iter().all(|x| x.is_finite()) {
+            return false;
+        }
+        if !self.control.iter().all(|c| c.is_finite()) {
+            return false;
+        }
+        if self.knots.windows(2).any(|w| w[0] > w[1]) {
+            return false;
+        }
+        let (lo, hi) = self.domain();
+        hi > lo
+    }
+
+    /// The curve is non-rational (no weights) for now; weights come in a later task.
+    pub fn is_rational(&self) -> bool {
+        false
+    }
+
+    pub fn domain(&self) -> (f64, f64) {
+        let lo = self.knots.get(self.degree).copied().unwrap_or(0.0);
+        let hi = self.knots.get(self.control.len()).copied().unwrap_or(0.0);
+        (lo, hi)
+    }
+
+    fn eval_raw(&self, u: f64) -> crate::Vec3 {
+        if !self.is_valid() {
+            return crate::Vec3::ZERO;
+        }
+        let n = self.control.len() - 1;
+        let (lo, hi) = self.domain();
+        let u = if u.is_finite() {
+            u.clamp(lo, hi)
+        } else {
+            lo
+        };
+        let span = crate::spline::find_span(n, self.degree, u, &self.knots);
+        let b = crate::spline::basis(span, u, self.degree, &self.knots);
+        let mut p = crate::Vec3::ZERO;
+        for (k, nb) in b.iter().enumerate() {
+            let idx = span + k;
+            if idx >= self.degree {
+                let i = idx - self.degree;
+                if let Some(c) = self.control.get(i) {
+                    p = p + *c * *nb;
+                }
+            }
+        }
+        if !p.is_finite() {
+            crate::Vec3::ZERO
+        } else {
+            p
+        }
+    }
+
+    /// Evaluate at `u`; out-of-domain parameters are clamped to the domain.
+    pub fn eval(&self, u: f64) -> crate::Vec3 {
+        self.eval_raw(u)
+    }
+
+    /// Evaluate at `u`, refusing an out-of-domain or non-finite parameter.
+    pub fn try_eval(&self, u: f64) -> Result<crate::Vec3, NurbsError> {
+        if !self.is_valid() {
+            return Err(NurbsError::NonFiniteInput);
+        }
+        let (lo, hi) = self.domain();
+        if !u.is_finite() || u < lo || u > hi {
+            return Err(NurbsError::OutOfDomain);
+        }
+        Ok(self.eval_raw(u))
+    }
+
+    pub fn eval_checked(&self, u: f64) -> Result<crate::Vec3, NurbsError> {
+        self.try_eval(u)
+    }
+
+    pub fn eval_at(&self, u: f64) -> Result<crate::Vec3, NurbsError> {
+        self.try_eval(u)
+    }
+
+    pub fn evaluate(&self, u: f64) -> Result<crate::Vec3, NurbsError> {
+        self.try_eval(u)
+    }
+
+    pub fn point_at(&self, u: f64) -> Result<crate::Vec3, NurbsError> {
+        self.try_eval(u)
+    }
+
+    /// `order == 0` gives the point itself. Orders above the degree are zero.
+    pub fn derivative(&self, u: f64, order: usize) -> crate::Vec3 {
+        if !self.is_valid() {
+            return crate::Vec3::ZERO;
+        }
+        let (lo, hi) = self.domain();
+        let u = if u.is_finite() {
+            u.clamp(lo, hi)
+        } else {
+            lo
+        };
+        if order == 0 {
+            return self.eval_raw(u);
+        }
+        if order > self.degree {
+            return crate::Vec3::ZERO;
+        }
+        let mut q: Vec<crate::Vec3> = self.control.clone();
+        let mut deg = self.degree;
+        for _ in 0..order {
+            if q.len() < 2 {
+                return crate::Vec3::ZERO;
+            }
+            let n = q.len();
+            let mut next = Vec::with_capacity(n - 1);
+            for i in 0..n - 1 {
+                let a = self.knots.get(i + deg + 1).copied().unwrap_or(0.0);
+                let b = self.knots.get(i + 1).copied().unwrap_or(0.0);
+                let denom = a - b;
+                let scale = if denom.abs() > 1e-14 {
+                    deg as f64 / denom
+                } else {
+                    0.0
+                };
+                let diff = q.get(i + 1).copied().unwrap_or(crate::Vec3::ZERO)
+                    - q.get(i).copied().unwrap_or(crate::Vec3::ZERO);
+                next.push(diff * scale);
+            }
+            q = next;
+            deg = deg.saturating_sub(1);
+        }
+        let n = q.len().saturating_sub(1);
+        let mut span = crate::spline::find_span(n, deg, u, &self.knots);
+        if span > n {
+            span = n;
+        }
+        let b = crate::spline::basis(span, u, deg, &self.knots);
+        let mut p = crate::Vec3::ZERO;
+        for (k, nb) in b.iter().enumerate() {
+            let idx = span + k;
+            if idx >= deg {
+                let i = idx - deg;
+                if let Some(c) = q.get(i) {
+                    p = p + *c * *nb;
+                }
+            }
+        }
+        if p.is_finite() {
+            p
+        } else {
+            crate::Vec3::ZERO
+        }
+    }
+
+    /// Closest point: `(parameter, point)`.
+    pub fn closest_point(&self, p: crate::Vec3) -> (f64, crate::Vec3) {
+        if !self.is_valid() {
+            let (lo, _) = self.domain();
+            return (lo, crate::Vec3::ZERO);
+        }
+        if !p.is_finite() {
+            let (lo, _) = self.domain();
+            return (lo, self.eval_raw(lo));
+        }
+        let (lo, hi) = self.domain();
+        const N: usize = 96;
+        let mut best_u = lo;
+        let mut best_d2 = (self.eval_raw(lo) - p).len() * (self.eval_raw(lo) - p).len();
+        for i in 0..=N {
+            let t = i as f64 / N as f64;
+            let u = lo + (hi - lo) * t;
+            let q = self.eval_raw(u);
+            let d = q - p;
+            let d2 = d.len() * d.len();
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best_u = u;
+            }
+        }
+        let mut u = best_u;
+        for _ in 0..80 {
+            let q = self.eval_raw(u);
+            let qp = self.derivative(u, 1);
+            let qpp = self.derivative(u, 2);
+            let r = q - p;
+            let f = r.dot(qp);
+            let fp = qp.dot(qp) + r.dot(qpp);
+            if !fp.is_finite() || fp.abs() < 1e-18 {
+                break;
+            }
+            let delta = f / fp;
+            let new_u = (u - delta).clamp(lo, hi);
+            if (new_u - u).abs() <= 1e-14 {
+                u = new_u;
+                break;
+            }
+            u = new_u;
+        }
+        (u, self.eval_raw(u))
+    }
+
+    /// Arc length over the whole domain, by adaptive Gauss-Legendre quadrature.
+    pub fn length(&self, tolerance: f64) -> f64 {
+        if !self.is_valid() {
+            return 0.0;
+        }
+        let tol = if tolerance.is_finite() && tolerance > 0.0 {
+            tolerance
+        } else {
+            1e-9
+        };
+        let (lo, hi) = self.domain();
+        if !(hi > lo) {
+            return 0.0;
+        }
+        let speed = |u: f64| self.derivative(u, 1).len();
+        let whole = gauss(lo, hi, &speed);
+        let est = adaptive_gauss_tol(lo, hi, whole, &speed, MAX_GAUSS_DEPTH, tol);
+        if est.is_finite() && est >= 0.0 { est } else { 0.0 }
+    }
+}
+
+#[cfg(test)]
+mod nurbs3d_tests {
+    use super::*;
+
+    #[test]
+    fn bezier_arc_degree2_matches_closed_form() {
+        let knots = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let c0 = crate::Vec3::new(0.0, 0.0, 0.0);
+        let c1 = crate::Vec3::new(0.5, 1.0, 0.2);
+        let c2 = crate::Vec3::new(1.0, 0.0, 0.4);
+        let c = NurbsCurve::new(2, knots, vec![c0, c1, c2]).unwrap();
+        for i in 0..=10 {
+            let t = i as f64 / 10.0;
+            let o = 1.0 - t;
+            let expected = c0 * (o * o) + c1 * (2.0 * o * t) + c2 * (t * t);
+            let got = c.eval(t);
+            assert!((got - expected).len() < 1e-12);
+        }
+        assert!(!c.is_rational());
+    }
+
+    #[test]
+    fn line_degree1_endpoints_and_midpoint_exact() {
+        let a = crate::Vec3::new(0.0, 0.0, 0.0);
+        let b = crate::Vec3::new(2.0, 4.0, 6.0);
+        let knots = vec![0.0, 0.0, 1.0, 1.0];
+        let c = NurbsCurve::new(1, knots, vec![a, b]).unwrap();
+        assert_eq!(c.eval(0.0), a);
+        assert_eq!(c.eval(1.0), b);
+        let mid = c.eval(0.5);
+        assert!((mid - crate::Vec3::new(1.0, 2.0, 3.0)).len() < 1e-15);
+        assert_eq!(c.domain(), (0.0, 1.0));
+    }
+
+    #[test]
+    fn quarter_circle_approximation_stays_close() {
+        // A degree-2 B-spline with five control points on the quarter circle.
+        let pts = [
+            (1.0_f64, 0.0_f64),
+            (0.8660254037844386_f64, 0.5_f64),
+            (0.7071067811865476_f64, 0.7071067811865476_f64),
+            (0.5_f64, 0.8660254037844386_f64),
+            (0.0_f64, 1.0_f64),
+        ];
+        let degree = 2usize;
+        let n = pts.len();
+        // Clamped uniform-ish knot vector for an open curve.
+        let mut knots = Vec::with_capacity(n + degree + 1);
+        for _ in 0..=degree {
+            knots.push(0.0);
+        }
+        for i in 1..=n - degree - 1 {
+            knots.push(i as f64 / (n - degree) as f64);
+        }
+        for _ in 0..=degree {
+            knots.push(1.0);
+        }
+        // Pad if needed to exact length.
+        while knots.len() < n + degree + 1 {
+            knots.push(1.0);
+        }
+        let ctrl: Vec<crate::Vec3> = pts
+            .iter()
+            .map(|&(x, y)| crate::Vec3::new(x, y, 0.0))
+            .collect();
+        let c = NurbsCurve::new(degree, knots, ctrl).unwrap();
+        let (lo, hi) = c.domain();
+        for i in 0..=20 {
+            let u = lo + (hi - lo) * i as f64 / 20.0;
+            let p = c.eval(u);
+            let r = (p.x * p.x + p.y * p.y).sqrt();
+            assert!((r - 1.0).abs() <= 0.2, "radius {} at u {}", r, u);
+        }
+    }
+
+    #[test]
+    fn derivative_matches_finite_difference() {
+        let knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 3.0, 3.0, 3.0];
+        let ctrl: Vec<crate::Vec3> = (0..6)
+            .map(|i| crate::Vec3::new(i as f64, (i as f64).sin(), (i as f64).cos()))
+            .collect();
+        let c = NurbsCurve::new(3, knots, ctrl).unwrap();
+        let (lo, hi) = c.domain();
+        let h = 1e-5;
+        for i in 1..=5 {
+            let u = lo + (hi - lo) * i as f64 / 6.0;
+            let ana = c.derivative(u, 1);
+            let um = (u - h).clamp(lo, hi);
+            let up = (u + h).clamp(lo, hi);
+            let num = (c.eval(up) - c.eval(um)) * (1.0 / (2.0 * h));
+            // componentwise compare
+            assert!((ana.x - num.x).abs() < 1e-6, "x {} vs {}", ana.x, num.x);
+            assert!((ana.y - num.y).abs() < 1e-6, "y {} vs {}", ana.y, num.y);
+            assert!((ana.z - num.z).abs() < 1e-6, "z {} vs {}", ana.z, num.z);
+        }
+    }
+
+    #[test]
+    fn closest_point_is_local_minimum() {
+        let knots = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let c0 = crate::Vec3::new(0.0, 0.0, 0.0);
+        let c1 = crate::Vec3::new(2.0, 3.0, 0.0);
+        let c2 = crate::Vec3::new(4.0, 0.0, 0.0);
+        let c = NurbsCurve::new(2, knots, vec![c0, c1, c2]).unwrap();
+        let q = crate::Vec3::new(2.0, 1.0, 0.0);
+        let (u, p) = c.closest_point(q);
+        let h = 1e-6;
+        let (lo, hi) = c.domain();
+        let up = (u + h).min(hi);
+        let um = (u - h).max(lo);
+        let dp = (p - q).len();
+        let dup = (c.eval(up) - q).len();
+        let dum = (c.eval(um) - q).len();
+        assert!(dp <= dup + 1e-9);
+        assert!(dp <= dum + 1e-9);
+    }
+
+    #[test]
+    fn hostile_inputs_return_named_errors() {
+        use super::NurbsError;
+        // bad degree
+        assert!(matches!(
+            NurbsCurve::new(0, vec![0.0, 0.0, 1.0, 1.0], vec![crate::Vec3::ZERO, crate::Vec3::X]),
+            Err(NurbsError::BadDegree)
+        ));
+        // too few control points
+        assert!(matches!(
+            NurbsCurve::new(2, vec![0.0; 6], vec![crate::Vec3::ZERO, crate::Vec3::X]),
+            Err(NurbsError::BadDegree)
+        ));
+        // knot count mismatch
+        assert!(matches!(
+            NurbsCurve::new(1, vec![0.0, 1.0], vec![crate::Vec3::ZERO, crate::Vec3::X]),
+            Err(NurbsError::KnotCountMismatch)
+        ));
+        // non-monotone
+        assert!(matches!(
+            NurbsCurve::new(1, vec![0.0, 2.0, 1.0, 1.0], vec![crate::Vec3::ZERO, crate::Vec3::X]),
+            Err(NurbsError::NonMonotoneKnots)
+        ));
+        // empty domain
+        assert!(matches!(
+            NurbsCurve::new(1, vec![0.0, 0.0, 0.0, 0.0], vec![crate::Vec3::ZERO, crate::Vec3::X]),
+            Err(NurbsError::EmptyDomain)
+        ));
+        // non-finite input
+        assert!(matches!(
+            NurbsCurve::new(1, vec![0.0, 0.0, f64::NAN, 1.0], vec![crate::Vec3::ZERO, crate::Vec3::X]),
+            Err(NurbsError::NonFiniteInput)
+        ));
+        assert!(matches!(
+            NurbsCurve::new(1, vec![0.0, 0.0, 1.0, 1.0], vec![crate::Vec3::ZERO, crate::Vec3::new(f64::NAN, 0.0, 0.0)]),
+            Err(NurbsError::NonFiniteInput)
+        ));
+        // out-of-domain evaluation
+        let c = NurbsCurve::new(1, vec![0.0, 0.0, 1.0, 1.0], vec![crate::Vec3::ZERO, crate::Vec3::X]).unwrap();
+        assert!(matches!(c.try_eval(10.0), Err(NurbsError::OutOfDomain)));
+        assert!(matches!(c.try_eval(f64::NAN), Err(NurbsError::OutOfDomain)));
+        // eval on out-of-domain does not panic
+        let _ = c.eval(10.0);
+        let _ = c.derivative(10.0, 1);
+        let _ = c.closest_point(crate::Vec3::new(f64::NAN, 0.0, 0.0));
+        let _ = c.length(f64::NAN);
+        let _ = c.length(-1.0);
+    }
+
+    #[test]
+    fn nurbs_curve_length_is_sane() {
+        let a = crate::Vec3::ZERO;
+        let b = crate::Vec3::new(3.0, 4.0, 0.0);
+        let c = NurbsCurve::new(1, vec![0.0, 0.0, 1.0, 1.0], vec![a, b]).unwrap();
+        assert!((c.length(1e-9) - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn out_of_domain_methods_do_not_panic() {
+        let c = NurbsCurve::new(1, vec![0.0, 0.0, 1.0, 1.0], vec![crate::Vec3::ZERO, crate::Vec3::X]).unwrap();
+        for (f, name) in [
+            (c.eval_checked(2.0).is_err(), "checked"),
+        ] {
+            let _ = (f, name);
+        }
+        assert!(c.eval_checked(2.0).is_err());
+        assert!(c.eval_at(2.0).is_err());
+        assert!(c.evaluate(2.0).is_err());
+        assert!(c.point_at(2.0).is_err());
+    }
+}
+
+/// Adaptive Gauss-Legendre over `[a, b]` with an absolute tolerance.
+fn adaptive_gauss_tol(
+    a: f64,
+    b: f64,
+    whole: f64,
+    f: &impl Fn(f64) -> f64,
+    depth: usize,
+    tol: f64,
+) -> f64 {
+    let m = (a + b) / 2.0;
+    let (l, r) = (gauss(a, m, f), gauss(m, b, f));
+    if depth == 0 || !(l + r).is_finite() || (l + r - whole).abs() <= tol {
+        return l + r;
+    }
+    adaptive_gauss_tol(a, m, l, f, depth.saturating_sub(1), tol * 0.5)
+        + adaptive_gauss_tol(m, b, r, f, depth.saturating_sub(1), tol * 0.5)
+}

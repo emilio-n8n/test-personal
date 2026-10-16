@@ -317,6 +317,12 @@ impl WeldGrid {
 ///
 /// Quadratic in faces × edges × vertices, and skipped above [`MAX_WELD_VERTICES`] rather than
 /// spending a minute on a body nobody can look at.
+// Boundary-safe by construction: identity is resolved by proximity over the twenty-six
+// neighbouring cells of a `2 * tol` lattice (option (b) from the cell-straddle analysis), never
+// by a single rounded index per axis — that index has a line two copies of one corner can fall
+// either side of. Registration runs in geometry-derived order so the canonical corner is the
+// smallest one in each cluster, and inserted points are snapped to the canonical corner itself
+// instead of to a projection.
 pub fn weld_edges(faces: &mut [Face], tol: f64) -> usize {
     let total: usize = faces.iter().map(|f| f.vertices().len()).sum();
     if total > crate::limits::MAX_WELD_VERTICES {
@@ -328,7 +334,16 @@ pub fn weld_edges(faces: &mut [Face], tol: f64) -> usize {
     // Non-finite corners cannot be welded to anything, and rounding one into a cell would make the
     // loop arithmetic below produce NaN where it had an infinity. They are left exactly as they
     // were; validation, not this pass, decides what an unusable solid is.
-    let all: Vec<Vec3> = faces.iter().flat_map(|f| f.vertices()).filter(|v| v.is_finite()).collect();
+    // Registration order must not decide identity: two points that name the same corner within
+    // `tol` of each other must resolve to the same canonical corner no matter which face order a
+    // builder happened to emit them in. Sorting the vertices into a fixed, geometry-derived order
+    // makes the canonical point the lexicographically smallest corner in each tolerance cluster —
+    // the `2 * tol` cell is only a bucket for finding neighbours, never the identity — which is
+    // what option (b) (search the neighbouring cells) needs to be boundary-safe rather than
+    // first-writer-wins. This is the cell-straddle lesson: a single rounded index per axis cannot
+    // be the verdict, because it has a line for two copies of one corner to fall on either side of.
+    let mut all: Vec<Vec3> = faces.iter().flat_map(|f| f.vertices()).filter(|v| v.is_finite()).collect();
+    all.sort_by(|u, v| u.x.total_cmp(&v.x).then(u.y.total_cmp(&v.y)).then(u.z.total_cmp(&v.z)));
     let Some(first) = all.first().copied() else { return 0 };
     // The shell's own corner, not `Vec3::ZERO` clamped: every cell index is then small and
     // non-negative whatever the drawing's coordinates are.
@@ -392,7 +407,7 @@ pub fn weld_edges(faces: &mut [Face], tol: f64) -> usize {
                         if off > tol {
                             continue;
                         }
-                        inner.push((t, a + dir * t));
+                        inner.push((t, plane.to_local(*v))); // boundary-safe: canonical grid point, not a projection
                     }
                     if inner.is_empty() {
                         continue;
@@ -851,6 +866,64 @@ mod weld_tests {
         let twice = Solid::from_faces(faces).unwrap_or_default();
         assert!((twice.volume() - once.volume()).abs() < 1e-12, "the second pass moved volume: {} -> {}", once.volume(), twice.volume());
         assert!((twice.area() - once.area()).abs() < 1e-12, "the second pass moved area: {} -> {}", once.area(), twice.area());
+    }
+
+    /// A vertex that lands exactly on a cell boundary of the welding grid is welded the same
+    /// way as a vertex a hair to either side of it: the boundary is never the verdict.
+    ///
+    /// This is the cell-straddle from `KER-BOOL-004`, stated for `weld_edges` itself rather than
+    /// for validation. The grid buckets on a `2 * tol` lattice and resolves identity by proximity
+    /// over the twenty-six neighbouring cells (option (b)), so a point sitting exactly on that
+    /// lattice still finds the corner it belongs to instead of being rounded into a cell of its own.
+    #[test]
+    fn welding_a_vertex_on_a_cell_boundary_moves_no_area_or_volume() {
+        let b = box_at(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0));
+        let tol = b.tolerance();
+        // A corner half a tolerance away is, by `vkey`'s toleranced grid, on a cell boundary.
+        let half = tol * 0.5;
+        let mut faces = b.faces.clone();
+        let Some(y0) = face_carrying(&faces, Vec3::new(0.5, 0.0, 0.5)) else { return };
+        let Some(at) = loop_vertex(&faces[y0], Vec3::ZERO) else { return };
+        if !move_loop_vertex(&mut faces[y0], at, Vec3::new(half, 0.0, 0.0)) {
+            return;
+        }
+        assert_ne!(vkey(Vec3::new(half, 0.0, 0.0), Vec3::ZERO, tol), vkey(Vec3::ZERO, Vec3::ZERO, tol), "the corner must straddle a cell or this test says nothing");
+
+        let baseline_volume = Solid::from_faces(faces.clone()).unwrap_or_default().volume();
+        let baseline_area: f64 = faces.iter().map(|f| f.area()).sum();
+
+        weld_edges(&mut faces, tol);
+
+        let after_volume = Solid::from_faces(faces.clone()).unwrap_or_default().volume();
+        let after_area: f64 = faces.iter().map(|f| f.area()).sum();
+        assert!((after_volume - baseline_volume).abs() < 1e-8, "welding moved volume across the boundary: {baseline_volume} -> {after_volume}");
+        assert!((after_area - baseline_area).abs() < 1e-8, "welding moved area across the boundary: {baseline_area} -> {after_area}");
+    }
+
+    /// Welding a second time after the first pass must find nothing left to do and leave every
+    /// loop byte-for-byte: a pass that leaves a move for its successor never finishes.
+    #[test]
+    fn welding_twice_is_idempotent_and_preserves_volume_and_area() {
+        let b = box_at(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0));
+        let tol = b.tolerance();
+        let mut faces = b.faces.clone();
+        let before_volume = b.volume();
+        let before_area = b.area();
+
+        weld_edges(&mut faces, tol);
+        let after_first_loops: Vec<Vec<Vec2>> = faces.iter().flat_map(|f| f.region.loops().cloned()).collect();
+        let after_first_volume = Solid::from_faces(faces.clone()).unwrap_or_default().volume();
+        let after_first_area: f64 = faces.iter().map(|f| f.area()).sum();
+
+        assert_eq!(weld_edges(&mut faces, tol), 0, "a welded shell has nothing left to split");
+        let after_second_loops: Vec<Vec<Vec2>> = faces.iter().flat_map(|f| f.region.loops().cloned()).collect();
+        assert_eq!(after_first_loops, after_second_loops, "the second pass moved a corner");
+        let after_second_volume = Solid::from_faces(faces.clone()).unwrap_or_default().volume();
+        let after_second_area: f64 = faces.iter().map(|f| f.area()).sum();
+        assert!((after_second_volume - after_first_volume).abs() < 1e-12, "the second pass moved volume");
+        assert!((after_second_area - after_first_area).abs() < 1e-12, "the second pass moved area");
+        assert!((after_first_volume - before_volume).abs() < 1e-9, "welding moved volume");
+        assert!((after_first_area - before_area).abs() < 1e-9, "welding moved area");
     }
 }
 

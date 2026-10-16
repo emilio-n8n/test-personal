@@ -536,3 +536,24 @@ A Fusion 360-class system is a multi-year, multi-engineer programme. Seven free-
 CI pipeline do not change that. What they change is that work can now be *judged* at a rate this VM
 could never achieve. The plan's own weights stand: the kernel is 20 %, and NURBS — the gate on
 assemblies, drawing, simulation and CAM — is not started.
+
+### First CI map, per crate — run #2 (commit 2a78b01)
+
+The pipeline works and it judges in parallel. **Green:**
+
+```
+tests (cadcraft-geom)        tests (cadcraft-constraints)   tests (cadcraft-doc)
+tests (cadcraft-io)          tests (cadcraft-dxf)           tests (cadcraft-dwg)
+tests (cadcraft-fonts)       tests (cadcraft-color)         tests (cadcraft-mcp)
+gates (layers)               gates (assets)                 wasm
+```
+
+**Red:** `fmt`, `clippy`, `check`, `tests (cadcraft-ui-egui)` (`app`), `tests (cadcraft-render)`,
+`tests (cadcraft-solid)`, `tests (cadcraft-model)`.
+
+So the entire 2D application and its supporting crates are green on a clean machine, the layering and
+asset gates pass, and the wasm build passes. **Every red job is either the 3D work in progress or a
+workspace-wide format/lint pass that the 3D work breaks.**
+
+That is the map to work from. It also proves the thing this session was for: 12 crates judged in
+parallel, on GitHub's runners, without touching this VM's two cores.
